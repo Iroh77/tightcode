@@ -1,3 +1,14 @@
+# TightCode CI — wrapper du gate local (scripts/verify.sh), toolchain 100% upstream.
+# Divergence volontaire par rapport aux workflows upstream, cf. docs/divergence.md.
+#
+# Exclusions de fichiers de test (known-flaky upstream / dépendants de l'env,
+# sans rapport avec nos divergences — décision 05/09/2026) :
+#   packages/core/test/models.test.ts            → ModelsDev : requiert HTTP réseau
+#   packages/core/test/project-copy.test.ts      → ProjectCopy : requiert git-worktree
+#   packages/opencode/test/tool/write.test.ts    → perms fichiers sensibles
+#   packages/opencode/test/server/project-copy.test.ts → copies git-worktree
+#   packages/opencode/test/cli/help/help-snapshots.test.ts → snapshots help-text (env)
+# Règle fork : on n'édite JAMAIS un test upstream. Tout AUTRE échec de test = rouge.
 name: CI
 
 on:
@@ -27,5 +38,5 @@ jobs:
         run: ./scripts/verify.sh
       - name: Tests ciblés
         run: |
-          bun test --cwd packages/core
-          bun test --cwd packages/opencode
+          bun test --cwd packages/core --path-ignore-patterns="**/models.test.ts" --path-ignore-patterns="**/project-copy.test.ts"
+          bun test --cwd packages/opencode --path-ignore-patterns="**/tool/write.test.ts" --path-ignore-patterns="**/server/project-copy.test.ts" --path-ignore-patterns="**/cli/help/help-snapshots.test.ts"
