@@ -159,3 +159,30 @@ const table = sqliteTable("session", {
 - Keep delivery vocabulary explicit. Prompts steer by default and promote at the next safe provider-turn boundary while the current drain requires continuation. An explicit `queue` input remains pending until the Session would otherwise become idle; promote one queued input at that boundary, then reevaluate continuation before promoting another. Promoting any new user input resets the selected agent's provider-turn allowance; a batch of steers resets it once.
 - Keep EventV2 replay owner claims separate from clustered Session execution ownership.
 - Keep the System Context algebra, registry, and built-ins in `src/system-context`; keep Context Source producers with their observed domains, and keep Session History selection plus Context Epoch persistence Session-owned.
+
+---
+
+# TightCode router (fork-only section, appended by the `dev-project` scaffold)
+
+TightCode is a fork of this repo (`anomalyco/opencode`, `dev`). Rules above are upstream's contributor conventions and stay in force. The section below binds TightCode's own process — the **vault is the source of truth** for requirements/design/tickets.
+
+## Routes (read first)
+
+- REQUIREMENTS: `Second Cerveau/1 PROJETS/tightcode/REQUIREMENTS/index.md` (vault) — what must be true. `current step / next action` lives here.
+- ARCHITECTURE: `Second Cerveau/1 PROJETS/tightcode/ARCHITECTURE/index.md` (vault) — how it is designed.
+- Code map: `docs/code-map.md` (this repo) — the real structure, committed.
+- Stack record: `Second Cerveau/1 PROJETS/tightcode/TECH STACK.md` (vault) — decided tech, CI/CD, why.
+- Divergence registry: `docs/divergence.md` (this repo) — files modified vs upstream; everything else must stay byte-identical.
+
+## Bindings
+
+- **Remote:** GitHub (`github.com/Iroh77/tightcode`, public read) — `git remote origin`; upstream = `anomalyco/opencode` (`dev`), merged on a regular cadence. `git remote` is separate from vault sync (Syncthing).
+- **Dev machines:** desktop — tools checked/provisioned on the current machine; others = checklist below.
+- **Issue tracker:** local markdown at `Second Cerveau/1 PROJETS/tightcode/TICKETS/` (see `docs/agents/issue-tracker.md`).
+- **Vault writes:** this project's dev artifacts — `REQUIREMENTS/`, `ARCHITECTURE/`, `TICKETS/`, `Feedback/`, `TECH STACK.md` — are written in **English**. Vault-style notes (the context note `tightcode.md`, personal notes) are in **French** with `author:` frontmatter. Outside `Second Cerveau/1 PROJETS/tightcode/`, read `Second Cerveau/AGENTS.md` and follow the language conventions of the location concerned. Never use absolute machine paths — use the repo-relative symlink `Second Cerveau/…`.
+
+## Deferred-machine checklist
+
+- [ ] (none yet — desktop only)
+
+Files beyond the routes are read on demand. `/dev-requirements` | `/dev-basic-design` | `/dev-detailed-design` | `/dev-implement`
