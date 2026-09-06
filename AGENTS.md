@@ -168,7 +168,8 @@ TightCode is a fork of this repo (`anomalyco/opencode`, `dev`). Rules above are 
 
 ## Routes (read first)
 
-- REQUIREMENTS: `Second Cerveau/1 PROJETS/tightcode/REQUIREMENTS/index.md` (vault) — what must be true. `current step / next action` lives here.
+(vault = `Second Cerveau/...`, repo = this repo)
+- REQUIREMENTS: `Second Cerveau/1 PROJETS/tightcode/REQUIREMENTS/index.md` (vault) — what the application must do. `current step / next action` lives here.
 - ARCHITECTURE: `Second Cerveau/1 PROJETS/tightcode/ARCHITECTURE/index.md` (vault) — how it is designed.
 - Code map: `docs/code-map.md` (this repo) — the real structure, committed.
 - Stack record: `Second Cerveau/1 PROJETS/tightcode/TECH STACK.md` (vault) — decided tech, CI/CD, why.
@@ -179,7 +180,7 @@ TightCode is a fork of this repo (`anomalyco/opencode`, `dev`). Rules above are 
 - **Remote:** GitHub (`github.com/Iroh77/tightcode`, public read) — `git remote origin`; upstream = `anomalyco/opencode` (`dev`), merged on a regular cadence. `git remote` is separate from vault sync (Syncthing).
 - **Dev machines:** desktop — tools checked/provisioned on the current machine; others = checklist below.
 - **Issue tracker:** local markdown at `Second Cerveau/1 PROJETS/tightcode/TICKETS/` (see `docs/agents/issue-tracker.md`).
-- **Vault writes:** this project's dev artifacts — `REQUIREMENTS/`, `ARCHITECTURE/`, `TICKETS/`, `Feedback/`, `TECH STACK.md` — are written in **English**. Vault-style notes (the context note `tightcode.md`, personal notes) are in **French** with `author:` frontmatter. Outside `Second Cerveau/1 PROJETS/tightcode/`, read `Second Cerveau/AGENTS.md` and follow the language conventions of the location concerned. Never use absolute machine paths — use the repo-relative symlink `Second Cerveau/…`.
+- **Language:** everything repo side is **English** exclusively unless specified otherwise. Vault side: dev artifacts in `REQUIREMENTS/`, `ARCHITECTURE/`, `TICKETS/`, `Feedback/`, `TECH STACK.md` are written in **English**. If you need to act anywhere else on `Second Cerveau/` including other contents of `1 PROJETS/tightcode/`, follow `Second Cerveau/AGENTS.md` instructions and respect local language conventions. Never use absolute machine paths — use the repo-relative symlink `Second Cerveau/…`.
 
 ## Deferred-machine checklist
 
