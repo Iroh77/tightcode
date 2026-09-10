@@ -9,6 +9,7 @@ import { Tool } from "@/tool/tool"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
+import { ToolListing, type UniverseTool } from "@/session/tool-listing"
 
 import { Plugin } from "@/plugin"
 import type { TaskPromptOps } from "@/tool/task"
@@ -38,6 +39,10 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/webp",
 ])
 
+// Until ticket 05 wires the resolved R12-010 verdict into the per-turn
+// listing view, the advisory mode is a local constant.
+const ADVISORY = "advisory"
+
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
@@ -48,6 +53,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   promptOps: TaskPromptOps
 }) {
   const tools: Record<string, AITool> = {}
+  // Full per-turn facts (untruncated description, model-sanitized schema), the
+  // first-write source for the frozen prompt base. The AITool record below is
+  // rebuilt from the seeds' listing view (advisory until ticket 05); the
+  // authoritative listing shape is re-rendered from the frozen base at the
+  // payload (LLMRequestPrep impose).
+  const universe: UniverseTool[] = []
   const run = yield* EffectBridge.make()
   const plugin = yield* Plugin.Service
   const permission = yield* Permission.Service
@@ -96,6 +107,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     permission: input.session.permission,
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
+    universe.push({ name: item.id, description: item.description, jsonSchema: schema, source: "builtin" })
     tools[item.id] = tool({
       description: item.description,
       inputSchema: jsonSchema(schema),
@@ -133,25 +145,28 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
-  const hasMcpResourceServer = Object.values(yield* mcp.clients()).some(
-    (client) => !!client.getServerCapabilities()?.resources,
-  )
+  const clients = yield* mcp.clients()
+  const hasMcpResourceServer = Object.values(clients).some((client) => !!client.getServerCapabilities()?.resources)
   if (hasMcpResourceServer) {
-    tools[MCP_RESOURCE_TOOLS.list] = tool({
+    const listFacts = {
+      name: MCP_RESOURCE_TOOLS.list,
       description:
         "Lists resources provided by connected MCP servers. Resources provide context such as files, database schemas, or application-specific information.",
-      inputSchema: jsonSchema(
-        ProviderTransform.schema(input.model, {
-          type: "object",
-          properties: {
-            server: {
-              type: "string",
-              description: "Optional MCP server name. When omitted, lists resources from every connected server.",
-            },
+      jsonSchema: ProviderTransform.schema(input.model, {
+        type: "object",
+        properties: {
+          server: {
+            type: "string",
+            description: "Optional MCP server name. When omitted, lists resources from every connected server.",
           },
-          additionalProperties: false,
-        }),
-      ),
+        },
+        additionalProperties: false,
+      }),
+    }
+    universe.push({ ...listFacts, source: "resource" })
+    tools[MCP_RESOURCE_TOOLS.list] = tool({
+      description: listFacts.description,
+      inputSchema: jsonSchema(listFacts.jsonSchema),
       execute(args, opts) {
         return run.promise(
           Effect.gen(function* () {
@@ -219,22 +234,26 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       },
     })
 
-    tools[MCP_RESOURCE_TOOLS.listTemplates] = tool({
+    const listTemplatesFacts = {
+      name: MCP_RESOURCE_TOOLS.listTemplates,
       description:
         "Lists resource templates provided by connected MCP servers. Resource templates are parameterized resources that can be read after filling in their URI template.",
-      inputSchema: jsonSchema(
-        ProviderTransform.schema(input.model, {
-          type: "object",
-          properties: {
-            server: {
-              type: "string",
-              description:
-                "Optional MCP server name. When omitted, lists resource templates from every connected server.",
-            },
+      jsonSchema: ProviderTransform.schema(input.model, {
+        type: "object",
+        properties: {
+          server: {
+            type: "string",
+            description:
+              "Optional MCP server name. When omitted, lists resource templates from every connected server.",
           },
-          additionalProperties: false,
-        }),
-      ),
+        },
+        additionalProperties: false,
+      }),
+    }
+    universe.push({ ...listTemplatesFacts, source: "resource" })
+    tools[MCP_RESOURCE_TOOLS.listTemplates] = tool({
+      description: listTemplatesFacts.description,
+      inputSchema: jsonSchema(listTemplatesFacts.jsonSchema),
       execute(args, opts) {
         return run.promise(
           Effect.gen(function* () {
@@ -302,26 +321,30 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       },
     })
 
-    tools[MCP_RESOURCE_TOOLS.read] = tool({
+    const readFacts = {
+      name: MCP_RESOURCE_TOOLS.read,
       description:
         "Read a specific resource from an MCP server using the server name and resource URI. The URI is an MCP identifier and does not need to be a file URL.",
-      inputSchema: jsonSchema(
-        ProviderTransform.schema(input.model, {
-          type: "object",
-          properties: {
-            server: {
-              type: "string",
-              description: "MCP server name exactly as returned by list_mcp_resources.",
-            },
-            uri: {
-              type: "string",
-              description: "Resource URI to read. Use the exact URI string returned by list_mcp_resources.",
-            },
+      jsonSchema: ProviderTransform.schema(input.model, {
+        type: "object",
+        properties: {
+          server: {
+            type: "string",
+            description: "MCP server name exactly as returned by list_mcp_resources.",
           },
-          required: ["server", "uri"],
-          additionalProperties: false,
-        }),
-      ),
+          uri: {
+            type: "string",
+            description: "Resource URI to read. Use the exact URI string returned by list_mcp_resources.",
+          },
+        },
+        required: ["server", "uri"],
+        additionalProperties: false,
+      }),
+    }
+    universe.push({ ...readFacts, source: "resource" })
+    tools[MCP_RESOURCE_TOOLS.read] = tool({
+      description: readFacts.description,
+      inputSchema: jsonSchema(readFacts.jsonSchema),
       execute(args, opts) {
         return run.promise(
           Effect.gen(function* () {
@@ -385,38 +408,49 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
-  if (flags.experimentalCodeMode) return tools
+  if (!flags.experimentalCodeMode) {
+    // mcp.tools() keys are mangled `srv_tool` names; the sanitized server name
+    // for the prefix-once grouping comes from identity-matching the client.
+    const serversByClient = new Map(
+      Object.entries(clients).map(([name, client]) => [client, McpCatalog.sanitize(name)]),
+    )
+    for (const [key, entry] of Object.entries(yield* mcp.tools())) {
+      const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
+      const execute = item.execute
+      if (!execute) continue
 
-  for (const [key, entry] of Object.entries(yield* mcp.tools())) {
-    const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
-    const execute = item.execute
-    if (!execute) continue
-
-    const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
-    const transformed = ProviderTransform.schema(input.model, { ...schema, properties: schema.properties ?? {} })
-    item.inputSchema = jsonSchema(transformed)
-    item.execute = (args, opts) =>
-      run.promise(
-        Effect.gen(function* () {
-          const ctx = context(args, opts)
-          yield* plugin.trigger(
-            "tool.execute.before",
-            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
-            { args },
-          )
-          const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
-            yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-            return yield* Effect.promise(() => execute(args, opts))
-          }).pipe(
-            Effect.withSpan("Tool.execute", {
-              attributes: {
-                "tool.name": key,
-                "tool.call_id": opts.toolCallId,
-                "session.id": ctx.sessionID,
-                "message.id": input.processor.message.id,
-              },
-            }),
-          )
+      const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
+      const transformed = ProviderTransform.schema(input.model, { ...schema, properties: schema.properties ?? {} })
+      item.inputSchema = jsonSchema(transformed)
+      universe.push({
+        name: key,
+        description: item.description ?? "",
+        jsonSchema: transformed,
+        source: "mcp",
+        server: serversByClient.get(entry.client),
+      })
+      item.execute = (args, opts) =>
+        run.promise(
+          Effect.gen(function* () {
+            const ctx = context(args, opts)
+            yield* plugin.trigger(
+              "tool.execute.before",
+              { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
+              { args },
+            )
+            const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
+              yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
+              return yield* Effect.promise(() => execute(args, opts))
+            }).pipe(
+              Effect.withSpan("Tool.execute", {
+                attributes: {
+                  "tool.name": key,
+                  "tool.call_id": opts.toolCallId,
+                  "session.id": ctx.sessionID,
+                  "message.id": input.processor.message.id,
+                },
+              }),
+            )
           yield* plugin.trigger(
             "tool.execute.after",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
@@ -486,10 +520,26 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           return output
         }),
       )
-    tools[key] = item
+      tools[key] = item
+    }
   }
 
-  return tools
+  // Kill-switch (SC-3): upstream per-turn shapes pass through, the freeze
+  // never sees seeds (R00-013 — flag set is upstream-identical).
+  if (flags.disableLazyTools) return { tools, seeds: [] }
+
+  const seeds = ToolListing.shape({
+    universe,
+    ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
+  })
+  const listing = new Map(ToolListing.render(seeds, ADVISORY).map((entry) => [entry.name, entry]))
+  const shaped = Object.fromEntries(
+    Object.entries(tools).map(([name, entry]) => {
+      const view = listing.get(name)
+      return [name, view ? { ...entry, description: view.description, inputSchema: jsonSchema(view.jsonSchema) } : entry]
+    }),
+  )
+  return { tools: shaped, seeds }
 })
 
 function toRecord(value: unknown) {

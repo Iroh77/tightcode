@@ -31,6 +31,7 @@ import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
 import type { SystemBlock } from "./llm/prompt-base"
 import { PromptBase } from "./llm/prompt-base"
+import type { ToolSeed } from "./tool-listing"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -45,6 +46,7 @@ export type StreamInput = {
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
+  toolSeeds?: ToolSeed[]
   retries?: number
   toolChoice?: "auto" | "required" | "none"
 }

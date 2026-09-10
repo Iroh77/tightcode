@@ -3,6 +3,7 @@ import { Effect } from "effect"
 import { ProviderTransform } from "@/provider/transform"
 import { LLMRequestPrep } from "@/session/llm/request"
 import type { SystemBlock } from "@/session/llm/prompt-base"
+import type { ToolSeed } from "@/session/tool-listing"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
@@ -583,6 +584,8 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
         } as any,
         promptBase: {
           reconcileSystem: (input: { blocks: SystemBlock[] }) => Effect.succeed({ blocks: input.blocks, appended: [] }),
+          reconcileTools: (input: { seeds: ToolSeed[] }) =>
+            Effect.succeed({ entries: input.seeds, appended: [], mode: "advisory" as const }),
         },
         flags: { outputTokenMax: 32_000, client: "test" } as any,
         isWorkflow: false,

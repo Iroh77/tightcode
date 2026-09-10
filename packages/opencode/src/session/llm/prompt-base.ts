@@ -1,6 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { InstanceState } from "@/effect/instance-state"
 import type { Provider } from "@/provider/provider"
+import type { FrozenToolEntry, ToolSeed, Verdict } from "@/session/tool-listing"
 import { Context, Effect, Layer, Schema } from "effect"
 
 export type SystemBlockKey = "environment" | "instructions" | `mcp:${string}` | "skills" | "structured_output"
@@ -10,6 +11,11 @@ export type SystemBlock = { key: SystemBlockKey; content: string }
 export class DuplicateSystemBlockError extends Schema.TaggedErrorClass<DuplicateSystemBlockError>()(
   "DuplicateSystemBlockError",
   { key: Schema.String },
+) {}
+
+export class DuplicateToolEntryError extends Schema.TaggedErrorClass<DuplicateToolEntryError>()(
+  "DuplicateToolEntryError",
+  { name: Schema.String },
 ) {}
 
 const isMcp = (key: SystemBlockKey): key is `mcp:${string}` => key.startsWith("mcp:")
@@ -55,13 +61,26 @@ export interface Interface {
     provider: Provider.Info
     blocks: SystemBlock[]
   }) => Effect.Effect<{ blocks: SystemBlock[]; appended: string[] }, DuplicateSystemBlockError>
+  readonly reconcileTools: (input: {
+    sessionID: string
+    model: Provider.Model
+    provider: Provider.Info
+    seeds: ToolSeed[]
+    mode: Verdict
+  }) => Effect.Effect<{ entries: FrozenToolEntry[]; appended: string[]; mode: Verdict }, DuplicateToolEntryError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PromptBase") {}
 
 type PromptBaseState = {
   systemBlocks: SystemBlock[]
+  toolEntries: Map<string, FrozenToolEntry>
+  // The R12-010 verdict frozen with the first tool write: a mid-session
+  // BindingVerdict.observe flip must never re-render frozen entries (R12-007).
+  mode?: Verdict
 }
+
+const emptyState = (): PromptBaseState => ({ systemBlocks: [], toolEntries: new Map() })
 
 const layer = Layer.effect(
   Service,
@@ -79,8 +98,9 @@ const layer = Layer.effect(
       blocks: SystemBlock[]
     }) {
       const map = yield* InstanceState.get(state)
-      const frozen = map.get(stateKey(input))?.systemBlocks ?? []
-      const seen = new Set(frozen.map((block) => block.key))
+      const key = stateKey(input)
+      const current = map.get(key) ?? emptyState()
+      const seen = new Set(current.systemBlocks.map((block) => block.key))
       const appended: SystemBlock[] = []
       const perTurn: SystemBlock[] = []
       for (const block of input.blocks) {
@@ -93,11 +113,38 @@ const layer = Layer.effect(
         appended.push(block)
         seen.add(block.key)
       }
-      if (appended.length > 0) map.set(stateKey(input), { systemBlocks: [...frozen, ...appended] })
-      return { blocks: [...frozen, ...appended, ...perTurn], appended: appended.map((block) => block.key) }
+      if (appended.length > 0)
+        map.set(key, { ...current, systemBlocks: [...current.systemBlocks, ...appended] })
+      return { blocks: [...current.systemBlocks, ...appended, ...perTurn], appended: appended.map((block) => block.key) }
     })
 
-    return Service.of({ reconcileSystem })
+    const reconcileTools = Effect.fn("PromptBase.reconcileTools")(function* (input: {
+      sessionID: string
+      model: Provider.Model
+      provider: Provider.Info
+      seeds: ToolSeed[]
+      mode: Verdict
+    }) {
+      const map = yield* InstanceState.get(state)
+      const key = stateKey(input)
+      const current = map.get(key) ?? emptyState()
+      const mode = current.mode ?? input.mode
+      const appended: ToolSeed[] = []
+      for (const seedItem of input.seeds) {
+        if (current.toolEntries.has(seedItem.name)) continue
+        if (appended.some((existing) => existing.name === seedItem.name))
+          yield* new DuplicateToolEntryError({ name: seedItem.name })
+        appended.push(seedItem)
+      }
+      const toolEntries = appended.reduce((entries, seedItem) => {
+        entries.set(seedItem.name, seedItem)
+        return entries
+      }, new Map(current.toolEntries))
+      if (appended.length > 0) map.set(key, { ...current, toolEntries, mode })
+      return { entries: [...toolEntries.values()], appended: appended.map((seedItem) => seedItem.name), mode }
+    })
+
+    return Service.of({ reconcileSystem, reconcileTools })
   }),
 )
 

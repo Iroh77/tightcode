@@ -9,6 +9,7 @@ import type { MessageV2 } from "../message-v2"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
+import { ToolListing, type FrozenToolEntry, type ToolSeed, type Verdict } from "@/session/tool-listing"
 import { PromptBase } from "./prompt-base"
 import type { SystemBlock } from "./prompt-base"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -18,6 +19,10 @@ import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
+
+// Until ticket 05 wires the resolved R12-010 verdict into the listing, the
+// advisory mode is a local constant.
+const ADVISORY = "advisory"
 
 type PrepareInput = {
   readonly user: SessionV1.User
@@ -30,6 +35,7 @@ type PrepareInput = {
   readonly messages: ModelMessage[]
   readonly small?: boolean
   readonly tools: Record<string, Tool>
+  readonly toolSeeds?: ToolSeed[]
   readonly provider: Provider.Info
   readonly auth: Auth.Info | undefined
   readonly plugin: Plugin.Interface
@@ -56,10 +62,44 @@ export type Prepared = {
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
   mergeDeep(target, source ?? {}) as Record<string, any>
 
+// A frozen listing entry whose execute closure the per-turn record no longer
+// produces (e.g. its MCP server died mid-session) stays listed (R12-007:
+// nothing is ever removed) with an execute that fails with a clear error —
+// the AI SDK silently drops execute-less tools, leaving a dangling tool-call
+// that only surfaces as a provider 400 on the next turn.
+// The returned promise always rejects; the shape matches the AI SDK's tool
+// result so the failing execute typechecks as a real tool.
+const unavailableExecute = (name: string) => async (): Promise<{ output: string; title: string; metadata: object }> => {
+  throw new Error(
+    `The ${name} tool is no longer available in this session: the component that produced it stopped doing so mid-session (for example its MCP server disconnected).`,
+  )
+}
+
+// Impose (detailed design [c]): the frozen tool base is the authoritative
+// listing shape at the payload. Every frozen name is projected with its frozen
+// description/inputSchema, pairing execute closures from the per-turn record
+// while they exist; names outside the base (StructuredOutput, _noop) pass
+// through untouched. The permission/user.tools filter downstream stays
+// permissive-relevant for the current agent (R12-001 dominates after impose).
+const impose = (tools: Record<string, Tool>, frozen: { entries: FrozenToolEntry[]; mode: Verdict }): Record<string, Tool> => {
+  const result: Record<string, Tool> = {}
+  for (const entry of ToolListing.render(frozen.entries, frozen.mode)) {
+    const live = tools[entry.name]
+    result[entry.name] = live
+      ? { ...live, description: entry.description, inputSchema: jsonSchema(entry.jsonSchema) }
+      : aiTool({ description: entry.description, inputSchema: jsonSchema(entry.jsonSchema), execute: unavailableExecute(entry.name) })
+  }
+  for (const [name, tool] of Object.entries(tools)) {
+    if (name in result) continue
+    result[name] = tool
+  }
+  return result
+}
+
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
   // Kill-switch (SC-3) and small turns (summary/compaction) stay per-turn
-  // upstream behavior — no reconcile, no frozen state.
+  // upstream behavior — no reconcile, no impose, no frozen state.
   const bypass = input.small || input.flags.disableLazyTools
   const systemBlocks = bypass
     ? input.system
@@ -71,6 +111,15 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
           blocks: input.system,
         })
       ).blocks
+  const frozenTools = bypass
+    ? undefined
+    : yield* input.promptBase.reconcileTools({
+        sessionID: input.sessionID,
+        model: input.model,
+        provider: input.provider,
+        seeds: input.toolSeeds ?? [],
+        mode: ADVISORY,
+      })
   const system = [
     [
       ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
@@ -161,7 +210,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     },
   )
 
-  const tools = resolveTools(input)
+  const tools = resolveTools({ ...input, tools: frozenTools ? impose(input.tools, frozenTools) : input.tools })
   // Codex parity: OpenAI Responses-family providers hardcode `strict: false`
   // on every function tool so MCP-sourced and dynamic schemas that don't
   // satisfy OpenAI's structured-outputs constraints still register.

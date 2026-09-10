@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import type { JSONSchema7 } from "@ai-sdk/provider"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Effect } from "effect"
 import type { Provider } from "../../src/provider/provider"
 import { PromptBase, type SystemBlock } from "../../src/session/llm/prompt-base"
+import { ToolListing, type ToolSeed } from "../../src/session/tool-listing"
 import { testEffect } from "../lib/effect"
 const it = testEffect(LayerNode.compile(PromptBase.node))
 
@@ -42,7 +44,134 @@ const provider = (baseURL?: string): Provider.Info => ({
 const section = (name: string, ...lines: string[]) =>
   [`  <server name="${name}">`, ...lines.map((line) => `    ${line}`), "  </server>"].join("\n")
 
+const toolSchema = (label: string): JSONSchema7 => ({
+  type: "object",
+  properties: { label: { type: "string", const: label } },
+  required: ["label"],
+})
+
+const seed = (name: string, kind: "eager" | "deferred" = "deferred", description?: string, server?: string): ToolSeed => ({
+  name,
+  kind,
+  fullDescription: description ?? `${name} description`,
+  jsonSchema: toolSchema(name),
+  ...(server ? { server } : {}),
+})
+
 describe("session.prompt-base", () => {
+  describe("reconcileTools", () => {
+    it.instance("freezes tool entries on first write and absorbs per-turn recomputation", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const base = { sessionID: "ses_tools_freeze", model: model(), provider: provider(), mode: "advisory" as const }
+        const first = yield* promptBase.reconcileTools({
+          ...base,
+          seeds: [seed("shell", "eager"), seed("glob")],
+        })
+        expect(first.appended).toEqual(["shell", "glob"])
+        expect(first.mode).toBe("advisory")
+
+        // Upstream per-turn rebuilds (describeTask list, tool.definition hook,
+        // MCP def refresh) feed changed facts; the frozen entries absorb them.
+        const second = yield* promptBase.reconcileTools({
+          ...base,
+          seeds: [seed("shell", "eager", "CHANGED description"), seed("glob", "deferred", "CHANGED description")],
+        })
+        expect(second.appended).toEqual([])
+        expect(second.entries).toEqual(first.entries)
+        expect(second.mode).toBe("advisory")
+      }),
+    )
+
+    it.instance("appends new names as one batch in insertion order, existing entries immutable", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const base = { sessionID: "ses_tools_batch", model: model(), provider: provider(), mode: "advisory" as const }
+        const first = yield* promptBase.reconcileTools({ ...base, seeds: [seed("shell", "eager"), seed("glob")] })
+
+        const connect = yield* promptBase.reconcileTools({
+          ...base,
+          seeds: [
+            seed("shell", "eager"),
+            seed("glob"),
+            seed("firecrawl_scrape", "deferred", "Scrapes a page", "firecrawl"),
+            seed("firecrawl_search", "deferred", "Searches the web", "firecrawl"),
+          ],
+        })
+        expect(connect.appended).toEqual(["firecrawl_scrape", "firecrawl_search"])
+        expect(connect.entries.map((entry) => entry.name)).toEqual([
+          "shell",
+          "glob",
+          "firecrawl_scrape",
+          "firecrawl_search",
+        ])
+        expect(connect.entries.slice(0, 2)).toEqual(first.entries)
+
+        const later = yield* promptBase.reconcileTools({
+          ...base,
+          seeds: [...connect.entries.slice(0, 2), seed("firecrawl_scrape", "deferred", "CHANGED", "firecrawl")],
+        })
+        expect(later.appended).toEqual([])
+        expect(later.entries).toEqual(connect.entries)
+      }),
+    )
+
+    it.instance("agent switch never removes frozen entries or re-evaluates permissibility", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const base = { sessionID: "ses_tools_agent", model: model(), provider: provider(), mode: "advisory" as const }
+        const first = yield* promptBase.reconcileTools({
+          ...base,
+          seeds: [seed("shell", "eager"), seed("glob"), seed("task")],
+        })
+
+        // The switched-to agent's per-turn listing excludes task; the frozen
+        // base keeps it (R12-007: revocation is enforced at execution time).
+        const switched = yield* promptBase.reconcileTools({ ...base, seeds: [seed("shell", "eager"), seed("glob")] })
+        expect(switched.appended).toEqual([])
+        expect(switched.entries).toEqual(first.entries)
+        expect(switched.entries.some((entry) => entry.name === "task")).toBe(true)
+      }),
+    )
+
+    it.instance("freezes the mode at first write; a later verdict change never re-renders entries", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const base = { sessionID: "ses_tools_mode", model: model(), provider: provider(), mode: "advisory" as const }
+        const first = yield* promptBase.reconcileTools({ ...base, seeds: [seed("glob")] })
+        expect(first.mode).toBe("advisory")
+
+        // BindingVerdict.observe can flip the per-turn verdict mid-session
+        // (behavioral learning); the frozen base's mode is already written.
+        const flipped = yield* promptBase.reconcileTools({
+          ...base,
+          mode: "binding" as const,
+          seeds: [seed("glob", "deferred", "CHANGED")],
+        })
+        expect(flipped.mode).toBe("advisory")
+        const rendered = ToolListing.render(flipped.entries, flipped.mode)
+        expect(rendered[0].jsonSchema).toEqual({ type: "object", properties: {} })
+      }),
+    )
+
+    it.instance("fails with a typed error on duplicate names in one batch", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const error = yield* Effect.flip(
+          promptBase.reconcileTools({
+            sessionID: "ses_tools_dup",
+            model: model(),
+            provider: provider(),
+            mode: "advisory" as const,
+            seeds: [seed("glob"), seed("glob")],
+          }),
+        )
+        expect(error._tag).toBe("DuplicateToolEntryError")
+        expect(error.name).toBe("glob")
+      }),
+    )
+  })
+
   it.instance("freezes blocks on first write and re-serves identical bytes on later turns", () =>
     Effect.gen(function* () {
       const promptBase = yield* PromptBase.Service

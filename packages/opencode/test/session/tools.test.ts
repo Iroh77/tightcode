@@ -135,7 +135,7 @@ it.effect("preserves running tool start time across metadata updates", () =>
       completeToolCall: () => Effect.void,
     } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
 
-    const tools = yield* SessionTools.resolve({
+    const resolved = yield* SessionTools.resolve({
       agent,
       model,
       session: { id: sessionID, permission: [] } as unknown as Session.Info,
@@ -144,7 +144,7 @@ it.effect("preserves running tool start time across metadata updates", () =>
       messages: [],
       promptOps: {} as never,
     })
-    const execute = tools.timing.execute
+    const execute = resolved.tools.timing.execute
     if (!execute) throw new Error("timing tool is missing execute")
 
     yield* Effect.promise(() =>

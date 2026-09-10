@@ -16,13 +16,15 @@ Last upstream merge: `bbd72fb8b` (dev, scaffold, 2026-09-05).
 | `packages/session-ui/src/v2/components/prompt-input/index.tsx` | One character: `\200B` (legacy octal escape) → `\u200B`. Upstream lint (oxc) treats the octal as a parse error; TS (tsgo) tolerates it. Temporary divergence — the day upstream fixes it, this row's diff disappears. | `bbd72fb8b` |
 | `.github/workflows/*` (26 files) | Deleted wholesale (see permanent rule above); `ci.yml` replaces them. Delete/modify conflicts at merge are resolved with `git rm` (30 s). | `bbd72fb8b` |
 | `packages/opencode/src/effect/runtime-flags.ts` | R00-013: `disableLazyTools` flag (`OPENCODE_DISABLE_LAZY_TOOLS`) added (tool-lazy-loading kill-switch, SC-3). | `bbd72fb8b` |
-| `packages/opencode/src/session/llm.ts` | R12-008: `StreamInput.system` fork-extended `string[]` → `SystemBlock[]` (decision tool-lazy-loading-01 §4); live layer yields/wires `PromptBase` into `LLMRequestPrep.prepare`. | `bbd72fb8b` |
-| `packages/opencode/src/session/llm/request.ts` | R12-008/R12-007: `PrepareInput.system` → `SystemBlock[]` + `promptBase`; reconcile → render of frozen blocks before the upstream join; `small`/kill-switch bypass. | `bbd72fb8b` |
+| `packages/opencode/src/session/llm.ts` | R12-008: `StreamInput.system` fork-extended `string[]` → `SystemBlock[]` (decision tool-lazy-loading-01 §4); live layer yields/wires `PromptBase` into `LLMRequestPrep.prepare`. Ticket 03: `StreamInput.toolSeeds` fork-extension (seeds channel into the freeze). | `bbd72fb8b` |
+| `packages/opencode/src/session/llm/request.ts` | R12-008/R12-007: `PrepareInput.system` → `SystemBlock[]` + `promptBase`; reconcile → render of frozen blocks before the upstream join; `small`/kill-switch bypass. Ticket 03: `reconcileTools` + impose (frozen listing projected at the payload, missing closures get a clearly-failing execute). | `bbd72fb8b` |
+| `packages/opencode/src/session/tools.ts` | Ticket 03 (R12-007): `SessionTools.resolve` returns `{ tools, seeds }` — builds the universe (source per producer, sanitized MCP server name) + `ToolListing.shape` seeds; per-turn AITool record rebuilt from the seeds' listing view (advisory until ticket 05); kill-switch returns full shapes + empty seeds; MCP loop wrapped in `!experimentalCodeMode` instead of early return. | `bbd72fb8b` |
 | `packages/opencode/src/session/prompt.ts` | R12-008/SC-2: run loop assembles tagged `SystemBlock[]` (per-server `mcp:<server>` via `SystemPrompt.mcpBlocks`); `structured_output` stays a per-turn block. | `bbd72fb8b` |
 | `packages/opencode/src/session/system.ts` | SC-2: `mcpBlocks` added (per-server sections, permissibility filter); upstream `mcp` refactored onto the shared `serverSection` helper — output bytes unchanged (system.test.ts green). | `bbd72fb8b` |
-| `packages/opencode/test/provider/transform.test.ts` | `promptBase` passthrough stub added to a `LLMRequestPrep.prepare` call (new required input). | `bbd72fb8b` |
+| `packages/opencode/test/provider/transform.test.ts` | `promptBase` passthrough stub added to a `LLMRequestPrep.prepare` call (new required input). Ticket 03: stub also implements `reconcileTools`. | `bbd72fb8b` |
 | `packages/opencode/test/session/llm.test.ts` | `StreamInput.system` fixtures converted to `SystemBlock[]` (14 sites). | `bbd72fb8b` |
 | `packages/opencode/test/session/llm-native-recorded.test.ts` | `StreamInput.system` fixture converted to `SystemBlock[]`. | `bbd72fb8b` |
+| `packages/opencode/test/session/tools.test.ts` | Ticket 03: `SessionTools.resolve` call updated to the fork-extended `{ tools, seeds }` return. | `bbd72fb8b` |
 
 ## TightCode-only additive files (do not exist upstream — safe at merge)
 

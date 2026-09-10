@@ -1224,7 +1224,7 @@ const layer = Layer.effect(
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
             const promptOps = yield* ops()
 
-            const tools = yield* SessionTools.resolve({
+            const resolved = yield* SessionTools.resolve({
               agent,
               session,
               model,
@@ -1242,7 +1242,7 @@ const layer = Layer.effect(
             )
 
             if (lastUser.format?.type === "json_schema") {
-              tools["StructuredOutput"] = createStructuredOutputTool({
+              resolved.tools["StructuredOutput"] = createStructuredOutputTool({
                 schema: lastUser.format.schema,
                 onSuccess(output) {
                   structured = output
@@ -1284,7 +1284,8 @@ const layer = Layer.effect(
                 ...modelMsgs,
                 ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
               ],
-              tools,
+              tools: resolved.tools,
+              toolSeeds: resolved.seeds,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
