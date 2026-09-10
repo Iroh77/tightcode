@@ -1,0 +1,113 @@
+import type { JSONSchema7 } from "@ai-sdk/provider"
+import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { Schema } from "effect"
+import { Permission } from "@/permission"
+
+export type Verdict = "binding" | "advisory"
+
+const SOURCES = ["builtin", "resource", "mcp", "plugin", "custom"] as const
+
+export type UniverseTool = {
+  name: string
+  description: string
+  jsonSchema: JSONSchema7
+  source: (typeof SOURCES)[number]
+  server?: string
+}
+
+// Produced per turn by shape: the pre-freeze fact. Carries the untruncated
+// description and the full (model-sanitized) schema so that frozen entries
+// stay mode-independent — the advisory placeholder must never overwrite the
+// only copy the frozen base holds (load_tool re-serves it, R12-004/R12-005).
+export type ToolSeed = {
+  name: string
+  kind: "eager" | "deferred"
+  fullDescription: string
+  jsonSchema: JSONSchema7
+  server?: string
+}
+
+// Frozen at first write; never mutated (R12-007).
+export type FrozenToolEntry = ToolSeed
+
+export type ListingEntry = { name: string; description: string; jsonSchema: JSONSchema7 }
+
+export class MalformedToolEntryError extends Schema.TaggedErrorClass<MalformedToolEntryError>()(
+  "MalformedToolEntryError",
+  { name: Schema.String, reason: Schema.String },
+) {}
+
+// Several provider families require the field, so a truly absent schema is not
+// sendable; one family-agnostic constant keeps R12-009 intact (R12-003 amendment).
+export const PLACEHOLDER: JSONSchema7 = { type: "object", properties: {} }
+
+const EAGER = new Set(["shell", "read", "load_tool"])
+
+const TRUNCATE_BOUND = 100
+
+// Decision tool-lazy-loading-03 §1: first ≤100 chars, cut at the last word
+// boundary within the bound, "..." appended when truncated; empty stays empty.
+const truncate100 = (description: string) => {
+  if (description.length <= TRUNCATE_BOUND) return description
+  const bound = description.slice(0, TRUNCATE_BOUND)
+  const cut = bound.lastIndexOf(" ")
+  return (cut > 0 ? bound.slice(0, cut) : bound) + "..."
+}
+
+export const shape = (input: { universe: UniverseTool[]; ruleset: PermissionV1.Ruleset }): ToolSeed[] => {
+  validate(input.universe)
+  const denied = Permission.disabled(
+    input.universe.map((tool) => tool.name),
+    input.ruleset,
+  )
+  return input.universe
+    .filter((tool) => !denied.has(tool.name))
+    .map((tool) => ({
+      name: tool.name,
+      kind: EAGER.has(tool.name) ? ("eager" as const) : ("deferred" as const),
+      fullDescription: tool.description,
+      jsonSchema: tool.jsonSchema,
+      ...(tool.server !== undefined ? { server: tool.server } : {}),
+    }))
+}
+
+export const render = (entries: FrozenToolEntry[], mode: Verdict): ListingEntry[] => {
+  // R12-003 prefix-once, owned by the group's first-written entry (decision
+  // tool-lazy-loading-03 §2 as amended at ticket 02 close): recomputing an
+  // alphabetical winner per render would move the prefix onto later appends
+  // and mutate frozen entries, which R12-008 forbids.
+  const owner = new Map<string, string>()
+  for (const entry of entries) {
+    if (entry.kind !== "deferred" || entry.server === undefined) continue
+    if (!owner.has(entry.server)) owner.set(entry.server, entry.name)
+  }
+  return entries.map((entry) => {
+    if (entry.kind === "eager") {
+      return { name: entry.name, description: entry.fullDescription, jsonSchema: entry.jsonSchema }
+    }
+    const prefix = entry.server !== undefined && owner.get(entry.server) === entry.name ? `${entry.server}: ` : ""
+    return {
+      name: entry.name,
+      description: prefix + truncate100(entry.fullDescription),
+      jsonSchema: mode === "binding" ? entry.jsonSchema : PLACEHOLDER,
+    }
+  })
+}
+
+function validate(universe: UniverseTool[]) {
+  for (const [index, tool] of universe.entries()) {
+    const at = `universe[${index}]`
+    if (typeof tool.name !== "string" || tool.name === "")
+      throw new MalformedToolEntryError({ name: "", reason: `${at}.name must be a non-empty string` })
+    if (typeof tool.description !== "string")
+      throw new MalformedToolEntryError({ name: tool.name, reason: `${at}.description must be a string` })
+    if (typeof tool.jsonSchema !== "object" || tool.jsonSchema === null || Array.isArray(tool.jsonSchema))
+      throw new MalformedToolEntryError({ name: tool.name, reason: `${at}.jsonSchema must be an object` })
+    if (!SOURCES.includes(tool.source))
+      throw new MalformedToolEntryError({ name: tool.name, reason: `${at}.source must be one of ${SOURCES.join(", ")}` })
+    if (tool.server !== undefined && (typeof tool.server !== "string" || tool.server === ""))
+      throw new MalformedToolEntryError({ name: tool.name, reason: `${at}.server must be a non-empty string when present` })
+  }
+}
+
+export * as ToolListing from "./tool-listing"

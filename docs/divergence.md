@@ -26,4 +26,4 @@ Last upstream merge: `bbd72fb8b` (dev, scaffold, 2026-09-05).
 
 ## TightCode-only additive files (do not exist upstream — safe at merge)
 
-`opencode.json`, `CHANGELOG.md`, `docs/code-map.md`, `docs/divergence.md`, `docs/agents/*`, `scripts/verify.sh`, `.opencode/agent/researcher-code.md`, `.github/workflows/ci.yml`, `packages/opencode/src/session/llm/prompt-base.ts`, `packages/opencode/test/session/prompt-base.test.ts`, `packages/opencode/test/session/llm-request-prep.test.ts`.
+`opencode.json`, `CHANGELOG.md`, `docs/code-map.md`, `docs/divergence.md`, `docs/agents/*`, `scripts/verify.sh`, `.opencode/agent/researcher-code.md`, `.github/workflows/ci.yml`, `packages/opencode/src/session/llm/prompt-base.ts`, `packages/opencode/test/session/prompt-base.test.ts`, `packages/opencode/test/session/llm-request-prep.test.ts`, `packages/opencode/src/session/tool-listing.ts`, `packages/opencode/test/session/tool-listing.test.ts`.
