@@ -4,6 +4,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Deterministic gate environment, matching CI (ubuntu-latest): upstream tests
+# assert English CLI/git output and 022 umask-derived file modes; a localized
+# desktop (fr) or group-write umask fails them without any code defect.
+export LC_ALL=C
+export LANG=C
+umask 022
+
 echo "== bun install =="
 bun install --frozen-lockfile
 

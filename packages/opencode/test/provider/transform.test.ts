@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { ProviderTransform } from "@/provider/transform"
 import { LLMRequestPrep } from "@/session/llm/request"
+import type { SystemBlock } from "@/session/llm/prompt-base"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
@@ -580,6 +581,9 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
           list: () => Effect.succeed([]),
           init: () => Effect.void,
         } as any,
+        promptBase: {
+          reconcileSystem: (input: { blocks: SystemBlock[] }) => Effect.succeed({ blocks: input.blocks, appended: [] }),
+        },
         flags: { outputTokenMax: 32_000, client: "test" } as any,
         isWorkflow: false,
       }),

@@ -373,7 +373,7 @@ const driveToolLoop = (scenario: RecordedScenario) =>
       sessionID,
       model: resolved,
       agent,
-      system: [WEATHER_SYSTEM],
+      system: [{ key: "instructions" as const, content: WEATHER_SYSTEM }],
       tools: { get_weather: weatherTool },
     }
 

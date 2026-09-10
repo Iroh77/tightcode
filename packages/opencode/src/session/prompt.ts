@@ -35,6 +35,7 @@ import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
+import type { SystemBlock } from "./llm/prompt-base"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "@/tool/shell/id"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -1254,21 +1255,24 @@ const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
+            const [skills, env, instructions, mcpBlocks, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
-              sys.mcp(agent, session.permission),
+              sys.mcpBlocks(agent, session.permission),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
-            const system = [
-              ...env,
-              ...instructions,
-              ...(mcpInstructions ? [mcpInstructions] : []),
-              ...(skills ? [skills] : []),
+            const system: SystemBlock[] = [
+              { key: "environment", content: env.join("\n") },
+              ...(instructions.length > 0
+                ? [{ key: "instructions" as const, content: instructions.join("\n") }]
+                : []),
+              ...mcpBlocks,
+              ...(skills ? [{ key: "skills" as const, content: skills }] : []),
             ]
             const format = lastUser.format ?? { type: "text" as const }
-            if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            if (format.type === "json_schema")
+              system.push({ key: "structured_output" as const, content: STRUCTURED_OUTPUT_SYSTEM_PROMPT })
             const result = yield* handle.process({
               user: lastUser,
               agent,

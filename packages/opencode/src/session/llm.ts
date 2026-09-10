@@ -29,6 +29,8 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import type { SystemBlock } from "./llm/prompt-base"
+import { PromptBase } from "./llm/prompt-base"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -39,7 +41,7 @@ export type StreamInput = {
   model: Provider.Model
   agent: Agent.Info
   permission?: PermissionV1.Ruleset
-  system: string[]
+  system: SystemBlock[]
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
@@ -70,6 +72,7 @@ const live: Layer.Layer<
   | EventV2Bridge.Service
   | LLMClientService
   | RuntimeFlags.Service
+  | PromptBase.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -81,6 +84,7 @@ const live: Layer.Layer<
     const events = yield* EventV2Bridge.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
+    const promptBase = yield* PromptBase.Service
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       yield* Effect.logInfo("stream", {
@@ -108,6 +112,7 @@ const live: Layer.Layer<
         provider: item,
         auth: info,
         plugin,
+        promptBase,
         flags,
         isWorkflow,
       })
@@ -398,6 +403,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     llmClient,
     RuntimeFlags.node,
+    PromptBase.node,
   ],
 })
 

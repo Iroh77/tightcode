@@ -23,6 +23,7 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import type { SystemBlock } from "./llm/prompt-base"
 
 export function provider(model: Provider.Model) {
   if (model.api.id.includes("muse")) {
@@ -52,6 +53,7 @@ export interface Interface {
   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcp: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<string | undefined>
+  readonly mcpBlocks: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<SystemBlock[]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
@@ -62,6 +64,12 @@ const layer = Layer.effect(
     const skill = yield* Skill.Service
     const mcp = yield* MCP.Service
     const locations = yield* LocationServiceMap.Service
+
+    const visibleServers = Effect.fnUntraced(function* (ruleset: PermissionV1.Ruleset) {
+      return (yield* mcp.instructions()).filter(
+        (item) => item.tools.length === 0 || Permission.disabled(item.tools, ruleset).size < item.tools.length,
+      )
+    })
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
@@ -117,25 +125,33 @@ const layer = Layer.effect(
       }),
 
       mcp: Effect.fn("SystemPrompt.mcp")(function* (agent: Agent.Info, permission?: PermissionV1.Ruleset) {
-        const ruleset = Permission.merge(agent.permission, permission ?? [])
-        const instructions = (yield* mcp.instructions()).filter(
-          (item) => item.tools.length === 0 || Permission.disabled(item.tools, ruleset).size < item.tools.length,
-        )
+        const instructions = yield* visibleServers(Permission.merge(agent.permission, permission ?? []))
         if (instructions.length === 0) return
 
         return [
           "<mcp_instructions>",
-          ...instructions.flatMap((item) => [
-            `  <server name="${item.name}">`,
-            ...item.instructions.split("\n").map((line) => `    ${line}`),
-            "  </server>",
-          ]),
+          ...instructions.flatMap((item) => serverSection(item)),
           "</mcp_instructions>",
         ].join("\n")
+      }),
+
+      mcpBlocks: Effect.fn("SystemPrompt.mcpBlocks")(function* (agent: Agent.Info, permission?: PermissionV1.Ruleset) {
+        const instructions = yield* visibleServers(Permission.merge(agent.permission, permission ?? []))
+        return instructions.map(
+          (item): SystemBlock => ({ key: `mcp:${item.name}`, content: serverSection(item).join("\n") }),
+        )
       }),
     })
   }),
 )
+
+function serverSection(item: { name: string; instructions: string }) {
+  return [
+    `  <server name="${item.name}">`,
+    ...item.instructions.split("\n").map((line) => `    ${line}`),
+    "  </server>",
+  ]
+}
 
 const locationServiceMapNode = LayerNode.make({
   service: LocationServiceMap.Service,

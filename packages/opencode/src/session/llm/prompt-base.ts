@@ -1,0 +1,106 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { InstanceState } from "@/effect/instance-state"
+import type { Provider } from "@/provider/provider"
+import { Context, Effect, Layer, Schema } from "effect"
+
+export type SystemBlockKey = "environment" | "instructions" | `mcp:${string}` | "skills" | "structured_output"
+
+export type SystemBlock = { key: SystemBlockKey; content: string }
+
+export class DuplicateSystemBlockError extends Schema.TaggedErrorClass<DuplicateSystemBlockError>()(
+  "DuplicateSystemBlockError",
+  { key: Schema.String },
+) {}
+
+const isMcp = (key: SystemBlockKey): key is `mcp:${string}` => key.startsWith("mcp:")
+
+// Per-message conditionals are outside the frozen prompt base (decision
+// tool-lazy-loading-01): they are rendered per turn, never frozen.
+const PER_TURN = new Set<SystemBlockKey>(["structured_output"])
+
+const endpoint = (input: { model: Provider.Model; provider: Provider.Info }) => {
+  const baseURL = input.provider.options.baseURL
+  // Upstream resolves an empty-string baseURL to the model URL at request
+  // time (provider.ts), so the state key follows the effective endpoint.
+  return typeof baseURL === "string" && baseURL !== "" ? baseURL : input.model.api.url
+}
+
+const stateKey = (input: { sessionID: string; model: Provider.Model; provider: Provider.Info }) =>
+  `${input.sessionID}:${input.model.providerID}/${input.model.id}/${endpoint(input)}`
+
+// Canonical upstream ordering: environment, instructions, mcp group, skills,
+// structured_output (SC-2). Projecting by key class keeps the rendered bytes
+// independent of the frozen array's append order.
+export const render = (blocks: SystemBlock[]): string[] => {
+  const environment = blocks.find((block) => block.key === "environment")
+  const instructions = blocks.find((block) => block.key === "instructions")
+  const mcp = blocks.filter((block) => isMcp(block.key))
+  const skills = blocks.find((block) => block.key === "skills")
+  const perTurn = blocks.filter((block) => PER_TURN.has(block.key))
+  return [
+    environment?.content,
+    instructions?.content,
+    mcp.length > 0
+      ? ["<mcp_instructions>", ...mcp.map((block) => block.content), "</mcp_instructions>"].join("\n")
+      : undefined,
+    skills?.content,
+    ...perTurn.map((block) => block.content),
+  ].filter((entry): entry is string => entry !== undefined)
+}
+
+export interface Interface {
+  readonly reconcileSystem: (input: {
+    sessionID: string
+    model: Provider.Model
+    provider: Provider.Info
+    blocks: SystemBlock[]
+  }) => Effect.Effect<{ blocks: SystemBlock[]; appended: string[] }, DuplicateSystemBlockError>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/PromptBase") {}
+
+type PromptBaseState = {
+  systemBlocks: SystemBlock[]
+}
+
+const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const state = yield* InstanceState.make(
+      Effect.fn("PromptBase.state")(function* () {
+        return new Map<string, PromptBaseState>()
+      }),
+    )
+
+    const reconcileSystem = Effect.fn("PromptBase.reconcileSystem")(function* (input: {
+      sessionID: string
+      model: Provider.Model
+      provider: Provider.Info
+      blocks: SystemBlock[]
+    }) {
+      const map = yield* InstanceState.get(state)
+      const frozen = map.get(stateKey(input))?.systemBlocks ?? []
+      const seen = new Set(frozen.map((block) => block.key))
+      const appended: SystemBlock[] = []
+      const perTurn: SystemBlock[] = []
+      for (const block of input.blocks) {
+        if (PER_TURN.has(block.key)) {
+          perTurn.push(block)
+          continue
+        }
+        if (appended.some((b) => b.key === block.key)) yield* new DuplicateSystemBlockError({ key: block.key })
+        if (seen.has(block.key)) continue
+        appended.push(block)
+        seen.add(block.key)
+      }
+      if (appended.length > 0) map.set(stateKey(input), { systemBlocks: [...frozen, ...appended] })
+      return { blocks: [...frozen, ...appended, ...perTurn], appended: appended.map((block) => block.key) }
+    })
+
+    return Service.of({ reconcileSystem })
+  }),
+)
+
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
+
+export * as PromptBase from "./prompt-base"
