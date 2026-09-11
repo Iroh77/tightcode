@@ -1,6 +1,13 @@
 import type { JSONSchema7 } from "@ai-sdk/provider"
-import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { Schema } from "effect"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import type { SessionV1 } from "@opencode-ai/core/v1/session"
+import type { ToolExecutionOptions } from "ai"
+import { Effect, Schema } from "effect"
+import type { EffectBridge } from "@/effect/bridge"
+import type { SessionProcessor } from "@/session/processor"
+import { delivered } from "@/tool/load_tool"
+import { Tool } from "@/tool/tool"
+import { errorMessage } from "@/util/error"
 import { Permission } from "@/permission"
 
 export type Verdict = "binding" | "advisory"
@@ -109,5 +116,75 @@ function validate(universe: UniverseTool[]) {
       throw new MalformedToolEntryError({ name: tool.name, reason: `${at}.server must be a non-empty string when present` })
   }
 }
+
+// Type-only reference (erased at runtime): keeps the fallback's expectations
+// in sync with the real processor handle without importing the processor into
+// this module.
+type UpdateToolCall = SessionProcessor.Handle["updateToolCall"]
+
+const schemaBlock = (seed: ToolSeed) =>
+  [`The ${seed.name} tool has not been loaded. Its full input schema is:`, "", JSON.stringify(seed.jsonSchema, null, 2)].join("\n")
+
+// R12-006 direct-call fallback (decision tool-lazy-loading-02 §3/§4): a
+// deferred tool executes when called without a prior load; on failure its full
+// schema rides the error output and the part is marked loaded, so recovery is
+// protocol-level rather than willingness-level. Permission denials and aborts
+// are not arg-shape failures and stay upstream (R12-001 enforcement unchanged).
+// A schema-validation failure additionally feeds BindingVerdict.observe:
+// grammar-enforced serving cannot produce one, so the signal is proof of
+// advisory — future sessions only, independent of the load state.
+export const withFallback = (
+  input: {
+    seed: ToolSeed
+    messages: SessionV1.WithParts[]
+    run: EffectBridge.Shape
+    updateToolCall: UpdateToolCall
+    observe: Effect.Effect<void>
+  },
+  execute: (args: unknown, options: ToolExecutionOptions) => Promise<unknown>,
+): ((args: unknown, options: ToolExecutionOptions) => Promise<unknown>) =>
+  async (args, options) => {
+    try {
+      return await execute(args, options)
+    } catch (error) {
+      if (options.abortSignal?.aborted) throw error
+      if (
+        error instanceof PermissionV1.RejectedError ||
+        error instanceof PermissionV1.DeniedError ||
+        error instanceof PermissionV1.CorrectedError
+      )
+        throw error
+      if (error instanceof Tool.InvalidArgumentsError) await input.run.promise(input.observe)
+      // Repeat failures stay quiet: the marker re-opens only when the model no
+      // longer sees the part that delivered the full content.
+      if (delivered(input.seed.name, input.messages)) throw error
+      // The marker must land while the part is still running — failToolCall
+      // preserves running metadata into the error state.
+      await input.run.promise(
+        input
+          .updateToolCall(options.toolCallId, (part) => {
+            if (part.state.status !== "running") return part
+            return {
+              ...part,
+              state: {
+                ...part.state,
+                metadata: { ...part.state.metadata, load_tool: { tools: [input.seed.name] } },
+              },
+            }
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("tool fallback could not set the delivery marker", {
+                tool: input.seed.name,
+                callID: options.toolCallId,
+                cause,
+              }),
+            ),
+            Effect.asVoid,
+          ),
+      )
+      throw new Error(`${errorMessage(error)}\n\n${schemaBlock(input.seed)}`)
+    }
+  }
 
 export * as ToolListing from "./tool-listing"

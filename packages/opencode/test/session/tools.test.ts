@@ -18,7 +18,7 @@ import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Effect, Layer, Schema } from "effect"
-import { jsonSchema } from "ai"
+import { jsonSchema, type ToolExecutionOptions } from "ai"
 import type { Verdict } from "@/session/tool-listing"
 import { testEffect } from "../lib/effect"
 
@@ -312,6 +312,143 @@ describe("session.tools lazy listing (ticket 05)", () => {
       expect(resolved.seeds).toEqual([])
       expect(resolved.tools.glob.description).toBe(long)
       expect(resolved.tools.glob.inputSchema).toEqual(jsonSchema(globSchema))
+    }),
+  )
+})
+
+describe("session.tools direct-call fallback (ticket 07)", () => {
+  const globSchema: JSONSchema7 = {
+    type: "object",
+    properties: { pattern: { type: "string" } },
+    required: ["pattern"],
+  }
+  const messageID = MessageID.ascending()
+
+  const failingGlobRegistry = Layer.succeed(
+    ToolRegistry.Service,
+    ToolRegistry.Service.of({
+      ids: () => Effect.succeed(["glob"]),
+      all: () => Effect.succeed([]),
+      named: () => Effect.die("unused"),
+      tools: () =>
+        Effect.succeed([
+          {
+            id: "glob",
+            description: "finds files",
+            parameters: Schema.Struct({}),
+            jsonSchema: globSchema,
+            // Production shape: Tool.wrap raises the decode failure as a
+            // defect (Effect.orDie), which is what the fallback catches.
+            execute: () => Effect.die(new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" })),
+          } satisfies Tool.Def,
+        ]),
+    }),
+  )
+
+  const observed: string[] = []
+  const verdictLearn = Layer.succeed(
+    BindingVerdict.Service,
+    BindingVerdict.Service.of({
+      resolve: () => Effect.succeed("advisory" as Verdict),
+      observe: () =>
+        Effect.sync(() => {
+          observed.push("schema-violation")
+        }),
+    }),
+  )
+
+  const itFallback = testEffect(
+    Layer.mergeAll(baseLayer({ registry: failingGlobRegistry }), verdictLearn, providerStub),
+  )
+  const itOff = testEffect(
+    Layer.mergeAll(
+      baseLayer({ flags: { disableLazyTools: true }, registry: failingGlobRegistry }),
+      verdictStub(undefined),
+      providerStub,
+    ),
+  )
+
+  const runningGlobPart = (): SessionV1.ToolPart => ({
+    id: PartID.ascending(),
+    sessionID,
+    messageID,
+    type: "tool",
+    tool: "glob",
+    callID,
+    state: { status: "running", input: {}, time: { start: 0 } },
+  })
+
+  const failingResolveInput = (state: SessionV1.ToolPart) => ({
+    agent,
+    model,
+    session: sessionStub,
+    processor: {
+      message: {
+        id: messageID,
+        sessionID,
+        role: "assistant",
+        parentID: MessageID.ascending(),
+        agent: "build",
+        mode: "build",
+        path: { cwd: "/tmp", root: "/tmp" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelV2.ID.make("test-model"),
+        providerID: ProviderV2.ID.make("test"),
+        time: { created: 1 },
+      } satisfies SessionV1.Assistant,
+      updateToolCall: (_toolCallID: string, update: (part: SessionV1.ToolPart) => SessionV1.ToolPart) =>
+        Effect.sync(() => {
+          state.state = update(state).state
+          return state
+        }),
+      completeToolCall: () => Effect.void,
+    } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">,
+    bypassAgentCheck: false,
+    messages: [] as SessionV1.WithParts[],
+    promptOps: promptOpsStub,
+  })
+
+  const rethrown = (execute: (args: unknown, options: ToolExecutionOptions) => Promise<unknown>) =>
+    Effect.promise(() =>
+      execute({}, { toolCallId: callID, messages: [], abortSignal: new AbortController().signal }).then(
+        () => new Error("expected the call to fail"),
+        (error: unknown) => error,
+      ),
+    )
+
+  itFallback.effect("a failed deferred call appends the schema, marks the part and observes the verdict", () =>
+    Effect.gen(function* () {
+      observed.length = 0
+      const state = runningGlobPart()
+      const resolved = yield* SessionTools.resolve(failingResolveInput(state))
+
+      const execute = resolved.tools.glob.execute
+      if (!execute) throw new Error("glob is missing execute")
+      const rejection = yield* rethrown(execute)
+      expect(rejection).toBeInstanceOf(Error)
+      expect((rejection as Error).message).toContain("missing pattern")
+      expect((rejection as Error).message).toContain(JSON.stringify(globSchema, null, 2))
+      if (state.state.status !== "running") throw new Error("part should still be running")
+      expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
+      expect(observed).toEqual(["schema-violation"])
+    }),
+  )
+
+  itOff.effect("kill-switch: a failed deferred call stays upstream — no schema append, no marker, no observe", () =>
+    Effect.gen(function* () {
+      observed.length = 0
+      const state = runningGlobPart()
+      const resolved = yield* SessionTools.resolve(failingResolveInput(state))
+
+      const execute = resolved.tools.glob.execute
+      if (!execute) throw new Error("glob is missing execute")
+      const rejection = yield* rethrown(execute)
+      expect(rejection).toBeInstanceOf(Tool.InvalidArgumentsError)
+      expect((rejection as Error).message).not.toContain(JSON.stringify(globSchema))
+      if (state.state.status !== "running") throw new Error("part should still be running")
+      expect(state.state.metadata?.load_tool).toBeUndefined()
+      expect(observed).toEqual([])
     }),
   )
 })

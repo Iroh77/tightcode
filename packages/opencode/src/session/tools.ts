@@ -537,10 +537,39 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
   })
   const listing = new Map(ToolListing.render(seeds, verdict).map((entry) => [entry.name, entry]))
+  // R12-006: every deferred entry's execute is wrapped once here — the single
+  // confluence of the built-in, resource and MCP closures — so the fallback
+  // covers all three families uniformly (R12-009) and processor.ts stays
+  // byte-identical upstream (decision tool-lazy-loading-02).
+  const observe = bindingVerdict.observe({ model: input.model, provider: providerInfo, reason: "schema-violation" })
+  const seedsByName = new Map(seeds.map((seed) => [seed.name, seed]))
   const shaped = Object.fromEntries(
     Object.entries(tools).map(([name, entry]) => {
       const view = listing.get(name)
-      return [name, view ? { ...entry, description: view.description, inputSchema: jsonSchema(view.jsonSchema) } : entry]
+      const seed = seedsByName.get(name)
+      if (!view || !seed || !entry.execute) return [name, entry]
+      return [
+        name,
+        {
+          ...entry,
+          description: view.description,
+          inputSchema: jsonSchema(view.jsonSchema),
+          ...(seed.kind === "deferred"
+            ? {
+                execute: ToolListing.withFallback(
+                  {
+                    seed,
+                    messages: input.messages,
+                    run,
+                    updateToolCall: input.processor.updateToolCall,
+                    observe,
+                  },
+                  entry.execute,
+                ),
+              }
+            : {}),
+        },
+      ]
     }),
   )
   return { tools: shaped, seeds, verdict }

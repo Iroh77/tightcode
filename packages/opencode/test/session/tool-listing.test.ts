@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import type { JSONSchema7 } from "@ai-sdk/provider"
-import { MalformedToolEntryError, PLACEHOLDER, ToolListing, type UniverseTool } from "../../src/session/tool-listing"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import type { SessionV1 } from "@opencode-ai/core/v1/session"
+import type { ToolExecutionOptions } from "ai"
+import { Effect } from "effect"
+import type { EffectBridge } from "../../src/effect/bridge"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { Tool } from "../../src/tool/tool"
+import { MalformedToolEntryError, PLACEHOLDER, ToolListing, type ToolSeed, type UniverseTool } from "../../src/session/tool-listing"
 
 const schema = (label: string): JSONSchema7 => ({
   type: "object",
@@ -250,5 +257,201 @@ describe("session.tool-listing", () => {
       expect(binding[2].description).toBe("firecrawl: Scrapes a page")
       expect(binding[0].jsonSchema).toEqual(advisory[0].jsonSchema)
     })
+  })
+})
+
+describe("session.tool-listing withFallback (R12-006)", () => {
+  const globSeed: ToolSeed = {
+    name: "glob",
+    kind: "deferred",
+    fullDescription: "glob full description",
+    jsonSchema: schema("glob"),
+  }
+
+  const sessionID = SessionID.make("ses_fallback")
+
+  const part = (state: SessionV1.ToolState): SessionV1.ToolPart => ({
+    id: PartID.ascending(),
+    sessionID,
+    messageID: MessageID.ascending(),
+    type: "tool",
+    callID: "call_fallback",
+    tool: "glob",
+    state,
+  })
+
+  const runningPart = () =>
+    part({ status: "running", input: { pattern: "*" }, time: { start: 0 }, metadata: { progress: "half" } })
+
+  const completedPart = () =>
+    part({
+      status: "completed",
+      input: {},
+      output: "done",
+      title: "done",
+      metadata: { preset: true },
+      time: { start: 0, end: 1 },
+    })
+
+  // A delivered marker on an error-shaped part (what a first fallback failure
+  // leaves behind) makes delivered() true for the next failure.
+  const fallbackHistory = (): SessionV1.WithParts[] => [
+    {
+      info: {} as SessionV1.Assistant,
+      parts: [
+        part({
+          status: "error",
+          input: { pattern: "*" },
+          error: "boom\n\nschema",
+          metadata: { load_tool: { tools: ["glob"] } },
+          time: { start: 0, end: 1 },
+        }),
+      ],
+    },
+  ]
+
+  const options = (): ToolExecutionOptions => ({
+    toolCallId: "call_fallback",
+    messages: [],
+    abortSignal: new AbortController().signal,
+  })
+  const abortedOptions = (): ToolExecutionOptions => {
+    const controller = new AbortController()
+    controller.abort()
+    return { toolCallId: "call_fallback", messages: [], abortSignal: controller.signal }
+  }
+
+  const harness = (input: {
+    messages?: SessionV1.WithParts[]
+    part?: SessionV1.ToolPart
+    execute: (args: unknown, options: ToolExecutionOptions) => Promise<unknown>
+  }) => {
+    const observed: string[] = []
+    const marked: SessionV1.ToolPart[] = []
+    let current = input.part
+    const run = {
+      promise: (effect: Effect.Effect<unknown, unknown, never>) => Effect.runPromise(effect),
+    } as EffectBridge.Shape
+    const wrapped = ToolListing.withFallback(
+      {
+        seed: globSeed,
+        messages: input.messages ?? [],
+        run,
+        updateToolCall: (_toolCallID, update) =>
+          Effect.sync(() => {
+            if (!current) return undefined
+            current = update(current)
+            marked.push(current)
+            return current
+          }),
+        observe: Effect.sync(() => observed.push("schema-violation")),
+      },
+      input.execute,
+    )
+    return { wrapped, observed, marked, current: () => current }
+  }
+
+  const rejection = async (promise: Promise<unknown>): Promise<unknown> =>
+    promise.then(
+      () => {
+        throw new Error("expected the call to fail")
+      },
+      (error) => error,
+    )
+
+  test("failed call appends the full schema to the error text and marks the part loaded", async () => {
+    const h = harness({ part: runningPart(), execute: async () => { throw new Error("boom") } })
+
+    const error = await rejection(h.wrapped({}, options()))
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain("boom")
+    expect((error as Error).message).toContain("glob")
+    expect((error as Error).message).toContain(JSON.stringify(schema("glob"), null, 2))
+    const state = h.current()?.state
+    if (state?.status !== "running") throw new Error("part should still be running")
+    expect(state.metadata?.load_tool).toEqual({ tools: ["glob"] })
+    // progress metadata written while running survives for failToolCall to preserve
+    expect(state.metadata?.progress).toBe("half")
+    expect(h.observed).toEqual([])
+  })
+
+  test("repeat failure stays quiet: the delivery marker already opened the tool", async () => {
+    const h = harness({ messages: fallbackHistory(), part: runningPart(), execute: async () => { throw new Error("boom again") } })
+    const before = structuredClone(h.current())
+
+    const error = await rejection(h.wrapped({}, options()))
+
+    expect((error as Error).message).toBe("boom again")
+    expect(h.current()).toEqual(before)
+    expect(h.marked).toEqual([])
+  })
+
+  test("abort is excluded: the original error passes through untouched", async () => {
+    const h = harness({ part: runningPart(), execute: async () => { throw new Error("aborted mid-execution") } })
+    const before = structuredClone(h.current())
+
+    const error = await rejection(h.wrapped({}, abortedOptions()))
+
+    expect((error as Error).message).toBe("aborted mid-execution")
+    expect(h.current()).toEqual(before)
+    expect(h.marked).toEqual([])
+  })
+
+  test("permission rejections are excluded in every shape", async () => {
+    for (const denial of [
+      new PermissionV1.RejectedError(),
+      new PermissionV1.DeniedError({ ruleset: [] }),
+      new PermissionV1.CorrectedError({ feedback: "no" }),
+    ]) {
+      const h = harness({ part: runningPart(), execute: async () => { throw denial } })
+      const before = structuredClone(h.current())
+
+      const error = await rejection(h.wrapped({}, options()))
+
+      expect(error).toBe(denial)
+      expect(h.current()).toEqual(before)
+      expect(h.marked).toEqual([])
+    }
+  })
+
+  test("invalid arguments observe the verdict even when already delivered, and stay quiet", async () => {
+    const h = harness({
+      messages: fallbackHistory(),
+      part: runningPart(),
+      execute: async () => { throw new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" }) },
+    })
+    const before = structuredClone(h.current())
+
+    const error = await rejection(h.wrapped({}, options()))
+
+    expect(h.observed).toEqual(["schema-violation"])
+    expect(error).toBeInstanceOf(Tool.InvalidArgumentsError)
+    expect(h.current()).toEqual(before)
+    expect(h.marked).toEqual([])
+  })
+
+  test("invalid arguments when not delivered: observe, append the schema, mark", async () => {
+    const h = harness({
+      part: runningPart(),
+      execute: async () => { throw new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" }) },
+    })
+
+    const error = await rejection(h.wrapped({}, options()))
+
+    expect(h.observed).toEqual(["schema-violation"])
+    expect((error as Error).message).toContain("missing pattern")
+    expect((error as Error).message).toContain(JSON.stringify(schema("glob"), null, 2))
+    const marked = h.current()?.state
+    if (marked?.status !== "running") throw new Error("part should still be running")
+    expect(marked.metadata?.load_tool).toEqual({ tools: ["glob"] })
+  })
+
+  test("the marker only lands on a running part", async () => {
+    const h = harness({ part: completedPart(), execute: async () => { throw new Error("boom") } })
+
+    await rejection(h.wrapped({}, options()))
+
+    expect((h.current()?.state as { metadata?: unknown }).metadata).toEqual({ preset: true })
   })
 })
