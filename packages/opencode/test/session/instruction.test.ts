@@ -9,7 +9,7 @@ import type { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { Global } from "@opencode-ai/core/global"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
-import { provideInstance, provideTmpdirInstance, tmpdirScoped } from "../fixture/fixture"
+import { provideInstance, provideTmpdirInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { TestConfig } from "../fixture/config"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -71,6 +71,26 @@ const tmpWithFiles = (files: Record<string, string>) =>
     yield* writeFiles(dir, files)
     return dir
   })
+
+// Git-rooted worktree with the session cwd at a subdirectory, so instruction
+// discovery has ancestors strictly between cwd and worktree. Global files live
+// in a separate empty dir unless the test opts in via `global`.
+const withWorktree = <A, E, R>(
+  files: Record<string, string>,
+  self: (worktree: string, globalDir: string) => Effect.Effect<A, E, R>,
+  options: { global?: Record<string, string>; cwd?: "sub-deep" | "worktree"; flags?: Partial<RuntimeFlags.Info> } = {},
+) =>
+  Effect.gen(function* () {
+    const globalDir = yield* tmpdirScoped()
+    yield* writeFiles(globalDir, options.global ?? {})
+    const worktree = yield* tmpdirScoped({ git: true })
+    yield* writeFiles(worktree, files)
+    const directory = options.cwd === "worktree" ? worktree : path.join(worktree, "sub", "deep")
+    return yield* self(worktree, globalDir).pipe(
+      provideInstance(directory),
+      provideInstruction({ home: globalDir, config: globalDir }, options.flags),
+    )
+  }).pipe(Effect.provide(testInstanceStoreLayer))
 
 function loaded(filepath: string): SessionV1.WithParts[] {
   const sessionID = SessionID.make("session-loaded-1")
@@ -260,5 +280,104 @@ describe("Instruction.systemPaths global config", () => {
         expect(paths.has(path.join(globalTmp, "AGENTS.md"))).toBe(true)
       }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
     }),
+  )
+})
+
+describe("Instruction.systemPaths root-wins (R11-001)", () => {
+  it.live("root AGENTS.md present: keeps cwd-level and worktree-root, drops intermediate ancestors", () =>
+    withWorktree({ "AGENTS.md": "# Root", "sub/AGENTS.md": "# Mid", "sub/deep/AGENTS.md": "# Deep" }, (worktree) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.size).toBe(2)
+        expect(paths.has(path.join(worktree, "sub", "deep", "AGENTS.md"))).toBe(true)
+        expect(paths.has(path.join(worktree, "AGENTS.md"))).toBe(true)
+        expect(paths.has(path.join(worktree, "sub", "AGENTS.md"))).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("root AGENTS.md present without a cwd-level match: worktree-root kept alone", () =>
+    withWorktree({ "AGENTS.md": "# Root", "sub/AGENTS.md": "# Mid" }, (worktree) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.size).toBe(1)
+        expect(paths.has(path.join(worktree, "AGENTS.md"))).toBe(true)
+        expect(paths.has(path.join(worktree, "sub", "AGENTS.md"))).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("root AGENTS.md absent: upstream stacking unchanged", () =>
+    withWorktree({ "sub/AGENTS.md": "# Mid", "sub/deep/AGENTS.md": "# Deep" }, (worktree) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.size).toBe(2)
+        expect(paths.has(path.join(worktree, "sub", "deep", "AGENTS.md"))).toBe(true)
+        expect(paths.has(path.join(worktree, "sub", "AGENTS.md"))).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("CLAUDE.md-only walk: root-wins never applies", () =>
+    withWorktree({ "CLAUDE.md": "# Root", "sub/CLAUDE.md": "# Mid", "sub/deep/CLAUDE.md": "# Deep" }, (worktree) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.size).toBe(3)
+        expect(paths.has(path.join(worktree, "sub", "deep", "CLAUDE.md"))).toBe(true)
+        expect(paths.has(path.join(worktree, "sub", "CLAUDE.md"))).toBe(true)
+        expect(paths.has(path.join(worktree, "CLAUDE.md"))).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("global instructions file unaffected by root-wins", () =>
+    withWorktree(
+      { "AGENTS.md": "# Root", "sub/AGENTS.md": "# Mid", "sub/deep/AGENTS.md": "# Deep" },
+      (worktree, globalDir) =>
+        Effect.gen(function* () {
+          const svc = yield* Instruction.Service
+          const paths = yield* svc.systemPaths()
+          expect(paths.size).toBe(3)
+          expect(paths.has(path.join(globalDir, "AGENTS.md"))).toBe(true)
+          expect(paths.has(path.join(worktree, "sub", "deep", "AGENTS.md"))).toBe(true)
+          expect(paths.has(path.join(worktree, "AGENTS.md"))).toBe(true)
+          expect(paths.has(path.join(worktree, "sub", "AGENTS.md"))).toBe(false)
+        }),
+      { global: { "AGENTS.md": "# Global" } },
+    ),
+  )
+
+  it.live("cwd equals worktree: single match, no behavior change", () =>
+    withWorktree(
+      { "AGENTS.md": "# Root" },
+      (worktree) =>
+        Effect.gen(function* () {
+          const svc = yield* Instruction.Service
+          const paths = yield* svc.systemPaths()
+          expect(paths.size).toBe(1)
+          expect(paths.has(path.join(worktree, "AGENTS.md"))).toBe(true)
+        }),
+      { cwd: "worktree" },
+    ),
+  )
+
+  it.live("disableStaticSlimming flag set: upstream stacking passthrough", () =>
+    withWorktree(
+      { "AGENTS.md": "# Root", "sub/AGENTS.md": "# Mid", "sub/deep/AGENTS.md": "# Deep" },
+      (worktree) =>
+        Effect.gen(function* () {
+          const svc = yield* Instruction.Service
+          const paths = yield* svc.systemPaths()
+          expect(paths.size).toBe(3)
+          expect(paths.has(path.join(worktree, "sub", "deep", "AGENTS.md"))).toBe(true)
+          expect(paths.has(path.join(worktree, "sub", "AGENTS.md"))).toBe(true)
+          expect(paths.has(path.join(worktree, "AGENTS.md"))).toBe(true)
+        }),
+      { flags: { disableStaticSlimming: true } },
+    ),
   )
 })

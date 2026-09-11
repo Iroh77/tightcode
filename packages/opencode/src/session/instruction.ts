@@ -5,6 +5,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Effect, Layer, Context } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Config } from "@/config/config"
+import { ContextSlimmer } from "./context-slimmer"
 import { InstanceState } from "@/effect/instance-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -125,8 +126,13 @@ const layer: Layer.Layer<
           const matches = yield* fs
             .findUp(file, ctx.directory, ctx.worktree)
             .pipe(Effect.catch(() => Effect.succeed([])))
-          if (matches.length > 0) {
-            matches.forEach((item) => paths.add(path.resolve(item)))
+          // R11-001: AGENTS.md walk only — CLAUDE.md/CONTEXT.md stacking is upstream behavior.
+          const slimmed =
+            !flags.disableStaticSlimming && file === "AGENTS.md"
+              ? ContextSlimmer.rootWins({ matches, file, directory: ctx.directory, worktree: ctx.worktree })
+              : matches
+          if (slimmed.length > 0) {
+            slimmed.forEach((item) => paths.add(path.resolve(item)))
             break
           }
         }

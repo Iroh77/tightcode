@@ -18,6 +18,7 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   pure: bool("OPENCODE_PURE"),
   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),
   disableLazyTools: bool("OPENCODE_DISABLE_LAZY_TOOLS"),
+  disableStaticSlimming: bool("OPENCODE_DISABLE_STATIC_SLIMMING"),
   disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
   disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
   disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
