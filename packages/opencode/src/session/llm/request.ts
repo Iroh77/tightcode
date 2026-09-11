@@ -20,10 +20,6 @@ import { mergeDeep } from "remeda"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
 
-// Until ticket 05 wires the resolved R12-010 verdict into the listing, the
-// advisory mode is a local constant.
-const ADVISORY = "advisory"
-
 type PrepareInput = {
   readonly user: SessionV1.User
   readonly sessionID: string
@@ -36,6 +32,7 @@ type PrepareInput = {
   readonly small?: boolean
   readonly tools: Record<string, Tool>
   readonly toolSeeds?: ToolSeed[]
+  readonly toolVerdict?: Verdict
   readonly provider: Provider.Info
   readonly auth: Auth.Info | undefined
   readonly plugin: Plugin.Interface
@@ -118,7 +115,12 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         model: input.model,
         provider: input.provider,
         seeds: input.toolSeeds ?? [],
-        mode: ADVISORY,
+        // The resolved R12-010 verdict rides the stream input from
+        // SessionTools.resolve; the base freezes it at the first write
+        // (reconcileTools returns the frozen mode, so a mid-session observe
+        // flip never re-renders written entries). A missing verdict is an
+        // unresolvable one — conservative binding (R12-010).
+        mode: input.toolVerdict ?? "binding",
       })
   const system = [
     [

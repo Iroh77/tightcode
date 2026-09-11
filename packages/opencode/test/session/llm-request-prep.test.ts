@@ -13,7 +13,7 @@ import type { Plugin } from "../../src/plugin"
 import type { Provider } from "../../src/provider/provider"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { SystemPrompt } from "../../src/session/system"
-import type { ToolSeed } from "../../src/session/tool-listing"
+import type { ToolSeed, Verdict } from "../../src/session/tool-listing"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([PromptBase.node, RuntimeFlags.node])))
@@ -80,6 +80,7 @@ const prepareWith = (input: {
   messages?: ModelMessage[]
   tools?: Record<string, Tool>
   toolSeeds?: ToolSeed[]
+  toolVerdict?: Verdict
 }) =>
   Effect.gen(function* () {
     return yield* LLMRequestPrep.prepare({
@@ -100,6 +101,7 @@ const prepareWith = (input: {
       small: input.small,
       tools: input.tools ?? {},
       toolSeeds: input.toolSeeds ?? [],
+      toolVerdict: input.toolVerdict,
       provider,
       auth: undefined,
       plugin,
@@ -205,6 +207,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_payload",
         tools: toolsTurn(),
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
       })
       expect(Object.keys(prepared.tools).toSorted()).toEqual(["glob", "load_tool"])
       // eager: full facts
@@ -227,6 +230,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_stable",
         tools: toolsTurn(),
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
       })
 
       const second = yield* prepareWith({
@@ -252,6 +256,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_load",
         tools: toolsTurn(),
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
       })
 
       // load_tool output rides message history: the full description + schema
@@ -263,6 +268,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_load",
         tools: toolsTurn(),
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
         messages: [
           { role: "user", content: "find the files" },
           {
@@ -300,6 +306,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_batch",
         tools: toolsTurn(),
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
       })
 
       const connect = yield* prepareWith({
@@ -316,6 +323,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
           seed("firecrawl_scrape", "deferred", "Scrapes a page", "firecrawl"),
           seed("firecrawl_search", "deferred", "Searches the web", "firecrawl"),
         ],
+        toolVerdict: "advisory",
       })
       expect(connect.tools.firecrawl_scrape.description).toBe("firecrawl: Scrapes a page")
       expect(connect.tools.firecrawl_search.description).toBe("Searches the web")
@@ -338,6 +346,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_agent",
         tools: { load_tool: fullTool("load_tool", "Loads a deferred tool"), glob: fullTool("glob", long), task: fullTool("task", "Delegate to an agent") },
         toolSeeds: [seed("load_tool", "eager"), seed("glob"), seed("task")],
+        toolVerdict: "advisory",
       })
 
       // The switched-to agent's per-turn listing drops task; the frozen base
@@ -348,6 +357,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_agent",
         tools: { load_tool: fullTool("load_tool", "Loads a deferred tool"), glob: fullTool("glob", long) },
         toolSeeds: [seed("load_tool", "eager"), seed("glob")],
+        toolVerdict: "advisory",
       })
       expect(switched.tools.task).toBeDefined()
       expect(switched.tools.task.description).toEqual(first.tools.task.description)
@@ -365,6 +375,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_dead",
         tools: { glob: fullTool("glob", long) },
         toolSeeds: [seed("glob", "deferred", long)],
+        toolVerdict: "advisory",
       })
 
       // MCP server died mid-session: the per-turn record drops the closure;
@@ -401,6 +412,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_pass",
         tools: { ...toolsTurn(), StructuredOutput: structuredOutput },
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
       })
       expect(prepared.tools.StructuredOutput.description).toBe("Return structured output")
       expect(prepared.tools.StructuredOutput.inputSchema).toEqual(jsonSchema(toolSchema("StructuredOutput")))
@@ -417,6 +429,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_kill",
         tools: toolsTurn(),
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
       })
       expect(bypass.tools.glob.description).toBe(long)
       expect(bypass.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
@@ -427,6 +440,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         sessionID: "ses_tools_kill",
         tools: toolsTurn("upstream rebuilt description"),
         toolSeeds: seedsTurn("upstream rebuilt description"),
+        toolVerdict: "advisory",
       })
       expect(changed.tools.glob.description).toBe("upstream rebuilt description")
     }),
@@ -443,9 +457,72 @@ describe("session.llm-request-prep.tool-freeze", () => {
         small: true,
         tools: toolsTurn(),
         toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
       })
       expect(small.tools.glob.description).toBe(long)
       expect(small.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
+    }),
+  )
+
+  it.instance("binding verdict: deferred entries carry the full schema at the payload, description stays truncated", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_tools_binding",
+        tools: toolsTurn(),
+        toolSeeds: seedsTurn(),
+        toolVerdict: "binding",
+      })
+      // R12-010 amendment 1: schema-eager, description-deferred
+      expect(prepared.tools.glob.description).toBe(long.slice(0, long.lastIndexOf(" ")) + "...")
+      expect(prepared.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
+      // eager entries are mode-independent
+      expect(prepared.tools.load_tool.inputSchema).toEqual(jsonSchema(toolSchema("load_tool")))
+    }),
+  )
+
+  it.instance("the mode is frozen with the first write; a later verdict flip never re-renders entries", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const first = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_tools_flip",
+        tools: toolsTurn(),
+        toolSeeds: seedsTurn(),
+        toolVerdict: "binding",
+      })
+      // a mid-session BindingVerdict.observe flip changes the per-turn verdict…
+      const flipped = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_tools_flip",
+        tools: toolsTurn(),
+        toolSeeds: seedsTurn(),
+        toolVerdict: "advisory",
+      })
+      // …but frozen entries keep the bytes they were written with (R12-007)
+      expect(flipped.tools.glob.inputSchema).toEqual(first.tools.glob.inputSchema)
+      expect(flipped.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
+    }),
+  )
+
+  it.instance("a missing verdict resolves conservative binding (R12-010: missing sources ⇒ binding)", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_tools_missing",
+        tools: toolsTurn(),
+        toolSeeds: seedsTurn(),
+      })
+      expect(prepared.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
     }),
   )
 })

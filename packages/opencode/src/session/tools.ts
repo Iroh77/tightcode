@@ -1,4 +1,5 @@
 import { Agent } from "@/agent/agent"
+import { BindingVerdict } from "@/session/binding-verdict"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -39,10 +40,6 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/webp",
 ])
 
-// Until ticket 05 wires the resolved R12-010 verdict into the per-turn
-// listing view, the advisory mode is a local constant.
-const ADVISORY = "advisory"
-
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
@@ -55,9 +52,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const tools: Record<string, AITool> = {}
   // Full per-turn facts (untruncated description, model-sanitized schema), the
   // first-write source for the frozen prompt base. The AITool record below is
-  // rebuilt from the seeds' listing view (advisory until ticket 05); the
-  // authoritative listing shape is re-rendered from the frozen base at the
-  // payload (LLMRequestPrep impose).
+  // rebuilt from the seeds' listing view; the authoritative listing shape is
+  // re-rendered from the frozen base at the payload (LLMRequestPrep impose).
   const universe: UniverseTool[] = []
   const run = yield* EffectBridge.make()
   const plugin = yield* Plugin.Service
@@ -524,22 +520,30 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     }
   }
 
-  // Kill-switch (SC-3): upstream per-turn shapes pass through, the freeze
-  // never sees seeds (R00-013 — flag set is upstream-identical).
-  if (flags.disableLazyTools) return { tools, seeds: [] }
+  // Kill-switch (SC-3): upstream per-turn shapes pass through, no verdict is
+  // resolved, the freeze never sees seeds (R00-013 — flag set is
+  // upstream-identical).
+  if (flags.disableLazyTools) return { tools, seeds: [], verdict: undefined }
 
+  const bindingVerdict = yield* BindingVerdict.Service
+  const providerService = yield* Provider.Service
+  // The verdict is resolved here, strictly before the session's first provider
+  // request (R12-010), scoped to the same (provider, model, endpoint) tuple
+  // the prompt base is frozen against; BindingVerdict memoizes per key.
+  const providerInfo = yield* providerService.getProvider(input.model.providerID)
+  const verdict = yield* bindingVerdict.resolve({ model: input.model, provider: providerInfo })
   const seeds = ToolListing.shape({
     universe,
     ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
   })
-  const listing = new Map(ToolListing.render(seeds, ADVISORY).map((entry) => [entry.name, entry]))
+  const listing = new Map(ToolListing.render(seeds, verdict).map((entry) => [entry.name, entry]))
   const shaped = Object.fromEntries(
     Object.entries(tools).map(([name, entry]) => {
       const view = listing.get(name)
       return [name, view ? { ...entry, description: view.description, inputSchema: jsonSchema(view.jsonSchema) } : entry]
     }),
   )
-  return { tools: shaped, seeds }
+  return { tools: shaped, seeds, verdict }
 })
 
 function toRecord(value: unknown) {

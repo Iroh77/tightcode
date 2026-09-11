@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { JSONSchema7 } from "@ai-sdk/provider"
-import { MalformedToolEntryError, ToolListing, type UniverseTool, type Verdict } from "../../src/session/tool-listing"
-
-// Until ticket 05 wires the resolved verdict, the advisory mode is a local constant.
-const ADVISORY: Verdict = "advisory"
+import { MalformedToolEntryError, PLACEHOLDER, ToolListing, type UniverseTool } from "../../src/session/tool-listing"
 
 const schema = (label: string): JSONSchema7 => ({
   type: "object",
@@ -116,7 +113,7 @@ describe("session.tool-listing", () => {
           universe: [def("shell", "Runs a shell command"), def("glob", "find files by glob patterns " + "y".repeat(80))],
           ruleset: [],
         }),
-        ADVISORY,
+        "advisory",
       )
       expect(view).toEqual([
         { name: "shell", description: "Runs a shell command", jsonSchema: schema("shell") },
@@ -140,7 +137,7 @@ describe("session.tool-listing", () => {
           ],
           ruleset: [],
         }),
-        ADVISORY,
+        "advisory",
       )
       expect(view[0].description).toEqual(bound)
       expect(view[1].description).toEqual("short description")
@@ -160,7 +157,7 @@ describe("session.tool-listing", () => {
           ],
           ruleset: [],
         }),
-        ADVISORY,
+        "advisory",
       )
       expect(view.map((entry) => entry.name)).toEqual(["firecrawl_scrape", "firecrawl_search", "notion_search", "shell"])
       expect(view[0].description).toBe("firecrawl: Scrapes")
@@ -176,7 +173,7 @@ describe("session.tool-listing", () => {
         ruleset: [],
       })
       // frozen insertion order: firecrawl_search written first, api_call appended later
-      const view = ToolListing.render([...frozen, ...appended], ADVISORY)
+      const view = ToolListing.render([...frozen, ...appended], "advisory")
       expect(view[0].description).toBe("firecrawl: Searches")
       expect(view[1].description).toBe("Calls the API")
     })
@@ -191,7 +188,7 @@ describe("session.tool-listing", () => {
           ],
           ruleset: [],
         }),
-        ADVISORY,
+        "advisory",
       )
       expect(view[0].description).toBe("srv: ")
       expect(view[1].description).toBe("")
@@ -208,11 +205,50 @@ describe("session.tool-listing", () => {
       ]
       const seeds = ToolListing.shape({ universe, ruleset: [] })
       expect(Object.keys(seeds[0]).toSorted()).toEqual(["fullDescription", "jsonSchema", "kind", "name"])
-      const view = ToolListing.render(seeds, ADVISORY)
+      const view = ToolListing.render(seeds, "advisory")
       for (const entry of view) {
         expect(Object.keys(entry).toSorted()).toEqual(["description", "jsonSchema", "name"])
         expect(entry.jsonSchema).toEqual({ type: "object", properties: {} })
       }
+    })
+  })
+
+  describe("render binding mode (R12-010)", () => {
+    const long = "search the workspace for " + "x".repeat(90)
+
+    const seeds = ToolListing.shape({
+      universe: [
+        def("shell", "Runs a shell command"),
+        def("glob", long),
+        def("firecrawl_scrape", "Scrapes a page", "mcp", "firecrawl"),
+        def("firecrawl_search", "Searches the web", "mcp", "firecrawl"),
+      ],
+      ruleset: [],
+    })
+
+    test("binding: every deferred entry carries its full schema; the description stays truncated", () => {
+      const view = ToolListing.render(seeds, "binding")
+      expect(view[0]).toEqual({ name: "shell", description: "Runs a shell command", jsonSchema: schema("shell") })
+      expect(view[1].name).toBe("glob")
+      // schema-eager, description-deferred (R12-010 amendment 1)
+      expect(view[1].jsonSchema).toEqual(schema("glob"))
+      expect(view[1].description).toBe(long.slice(0, long.lastIndexOf(" ")) + "...")
+    })
+
+    test("advisory: the same entries carry the constant placeholder instead", () => {
+      const view = ToolListing.render(seeds, "advisory")
+      expect(view[1].jsonSchema).toEqual(PLACEHOLDER)
+      expect(view[2].jsonSchema).toEqual(PLACEHOLDER)
+      // the mode changes which schema value is written, never the entry shape
+      expect(Object.keys(view[1]).toSorted()).toEqual(["description", "jsonSchema", "name"])
+    })
+
+    test("prefix-once and eager fullness are mode-independent", () => {
+      const binding = ToolListing.render(seeds, "binding")
+      const advisory = ToolListing.render(seeds, "advisory")
+      expect(binding.map((entry) => entry.description)).toEqual(advisory.map((entry) => entry.description))
+      expect(binding[2].description).toBe("firecrawl: Scrapes a page")
+      expect(binding[0].jsonSchema).toEqual(advisory[0].jsonSchema)
     })
   })
 })

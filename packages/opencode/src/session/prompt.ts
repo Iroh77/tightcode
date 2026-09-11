@@ -56,6 +56,7 @@ import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
+import { BindingVerdict } from "./binding-verdict"
 import { LLMEvent } from "@opencode-ai/llm"
 
 // @ts-ignore
@@ -140,6 +141,7 @@ const layer = Layer.effect(
     const llm = yield* LLM.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const bindingVerdict = yield* BindingVerdict.Service
     const database = yield* Database.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
@@ -1239,6 +1241,8 @@ const layer = Layer.effect(
               Effect.provideService(MCP.Service, mcp),
               Effect.provideService(Truncate.Service, truncate),
               Effect.provideService(RuntimeFlags.Service, flags),
+              Effect.provideService(BindingVerdict.Service, bindingVerdict),
+              Effect.provideService(Provider.Service, provider),
             )
 
             if (lastUser.format?.type === "json_schema") {
@@ -1286,6 +1290,7 @@ const layer = Layer.effect(
               ],
               tools: resolved.tools,
               toolSeeds: resolved.seeds,
+              toolVerdict: resolved.verdict,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
@@ -1629,6 +1634,7 @@ export const node = LayerNode.make({
     LLM.node,
     EventV2Bridge.node,
     RuntimeFlags.node,
+    BindingVerdict.node,
     Database.node,
   ],
 })
