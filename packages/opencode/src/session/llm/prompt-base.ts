@@ -68,6 +68,14 @@ export interface Interface {
     seeds: ToolSeed[]
     mode: Verdict
   }) => Effect.Effect<{ entries: FrozenToolEntry[]; appended: string[]; mode: Verdict }, DuplicateToolEntryError>
+  // Read view over the frozen base (load_tool path): the entries plus the
+  // frozen mode. An unknown key yields an empty view — callers render their
+  // own error lines from it.
+  readonly entries: (input: {
+    sessionID: string
+    model: Provider.Model
+    provider: Provider.Info
+  }) => Effect.Effect<{ entries: FrozenToolEntry[]; mode: Verdict | undefined }>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PromptBase") {}
@@ -144,7 +152,19 @@ const layer = Layer.effect(
       return { entries: [...toolEntries.values()], appended: appended.map((seedItem) => seedItem.name), mode }
     })
 
-    return Service.of({ reconcileSystem, reconcileTools })
+    const entries = Effect.fn("PromptBase.entries")(function* (input: {
+      sessionID: string
+      model: Provider.Model
+      provider: Provider.Info
+    }) {
+      const map = yield* InstanceState.get(state)
+      const current = map.get(stateKey(input))
+      return current
+        ? { entries: [...current.toolEntries.values()], mode: current.mode }
+        : { entries: [] as FrozenToolEntry[], mode: undefined }
+    })
+
+    return Service.of({ reconcileSystem, reconcileTools, entries })
   }),
 )
 

@@ -172,6 +172,30 @@ describe("session.prompt-base", () => {
     )
   })
 
+  describe("entries", () => {
+    it.instance("reads the frozen entries and frozen mode for the session key", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const base = { sessionID: "ses_entries", model: model(), provider: provider(), mode: "advisory" as const }
+        yield* promptBase.reconcileTools({ ...base, seeds: [seed("shell", "eager"), seed("glob")] })
+
+        const view = yield* promptBase.entries({ sessionID: "ses_entries", model: model(), provider: provider() })
+        expect(view.mode).toBe("advisory")
+        expect(view.entries.map((entry) => entry.name)).toEqual(["shell", "glob"])
+
+        // load_tool reads the same base the request froze; another session
+        // (or model/endpoint) sees nothing.
+        const other = yield* promptBase.entries({
+          sessionID: "ses_other",
+          model: model(),
+          provider: provider(),
+        })
+        expect(other.entries).toEqual([])
+        expect(other.mode).toBeUndefined()
+      }),
+    )
+  })
+
   it.instance("freezes blocks on first write and re-serves identical bytes on later turns", () =>
     Effect.gen(function* () {
       const promptBase = yield* PromptBase.Service

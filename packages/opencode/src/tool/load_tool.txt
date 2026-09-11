@@ -1,0 +1,7 @@
+Load deferred tools before using them. Some tools in the listing are advertised with only their name and a short summary; calling this tool returns the full description and input schema so the tool can be used correctly.
+
+Usage notes:
+- Accepts several tool names in one call; each requested name gets its own result section
+- The first load of a tool returns its full description and input schema; later loads return a short confirmation unless the original output left the conversation (e.g. after compaction), in which case the full content is served again
+- Never guess the argument shape of a deferred tool: load it first
+- Eager tools (shell, read, load_tool) are already fully listed and cannot be loaded

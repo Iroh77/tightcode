@@ -94,6 +94,12 @@ const withEmptyCodeMode = testEffect(
   ]),
 )
 const withBrokenPlugin = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, brokenPluginLayer]]))
+const withLazyDisabled = testEffect(
+  LayerNode.compile(root, [
+    [Config.node, configLayer],
+    [RuntimeFlags.node, RuntimeFlags.layer({ disableLazyTools: true })],
+  ]),
+)
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -115,6 +121,24 @@ describe("tool.registry", () => {
       const ids = yield* registry.ids()
 
       expect(ids).not.toContain("execute")
+    }),
+  )
+
+  it.instance("exposes load_tool (always eager, R12-002)", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+      expect(ids).toContain("load_tool")
+    }),
+  )
+
+  // R00-013 / R12-002: with the lazy-tools kill-switch set, the axis is
+  // upstream-identical — load_tool is not registered at all.
+  withLazyDisabled.instance("does not expose load_tool when lazy tools are disabled", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+      expect(ids).not.toContain("load_tool")
     }),
   )
 
