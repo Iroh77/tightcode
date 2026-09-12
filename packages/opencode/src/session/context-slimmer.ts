@@ -19,4 +19,18 @@ export function rootWins(input: { matches: string[]; file: string; directory: st
   return [last]
 }
 
+const MCP_INSTRUCTIONS_BOUND = 250
+
+// R11-002: keep the "what is this server for" signal, drop boilerplate —
+// word-boundary cut with the "..." inside the budget (unlike tool-listing's
+// truncate100, whose ellipsis sits outside its bound). The 248-unit head
+// leaves room for a word cut + ellipsis within the 250-unit budget.
+export function mcpInstructions(text: string): string {
+  if (text.length <= MCP_INSTRUCTIONS_BOUND) return text
+  const head = text.slice(0, MCP_INSTRUCTIONS_BOUND - 2)
+  const cut = head.lastIndexOf(" ")
+  const base = cut > 0 ? head.slice(0, cut) : text.slice(0, MCP_INSTRUCTIONS_BOUND - 3)
+  return base + "..."
+}
+
 export * as ContextSlimmer from "./context-slimmer"

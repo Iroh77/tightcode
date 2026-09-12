@@ -23,6 +23,8 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { ContextSlimmer } from "./context-slimmer"
 import type { SystemBlock } from "./llm/prompt-base"
 
 export function provider(model: Provider.Model) {
@@ -64,11 +66,16 @@ const layer = Layer.effect(
     const skill = yield* Skill.Service
     const mcp = yield* MCP.Service
     const locations = yield* LocationServiceMap.Service
+    const flags = yield* RuntimeFlags.Service
 
     const visibleServers = Effect.fnUntraced(function* (ruleset: PermissionV1.Ruleset) {
-      return (yield* mcp.instructions()).filter(
-        (item) => item.tools.length === 0 || Permission.disabled(item.tools, ruleset).size < item.tools.length,
-      )
+      return (yield* mcp.instructions())
+        .filter((item) => item.tools.length === 0 || Permission.disabled(item.tools, ruleset).size < item.tools.length)
+        .map((item) =>
+          flags.disableStaticSlimming
+            ? item
+            : { ...item, instructions: ContextSlimmer.mcpInstructions(item.instructions) },
+        )
     })
 
     return Service.of({
@@ -162,7 +169,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode],
+  deps: [Skill.node, MCP.node, locationServiceMapNode, RuntimeFlags.node],
 })
 
 export * as SystemPrompt from "./system"

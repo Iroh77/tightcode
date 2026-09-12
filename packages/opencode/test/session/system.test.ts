@@ -8,6 +8,7 @@ import { Permission } from "../../src/permission"
 import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { testEffect } from "../lib/effect"
 
 const skills: Skill.Info[] = [
@@ -163,6 +164,109 @@ describe("session.system", () => {
           "</mcp_instructions>",
         ].join("\n"),
       )
+    }),
+  )
+})
+
+describe("SystemPrompt.mcpInstructions truncation (R11-002)", () => {
+  const fixture = { instructions: "" }
+
+  const mcpLayer = Layer.mock(MCP.Service, {
+    instructions: () => Effect.succeed([{ name: "guide-server", instructions: fixture.instructions, tools: [] }]),
+  })
+
+  const skillLayer = Layer.mock(Skill.Service, {
+    get: (name) => Effect.succeed(skills.find((skill) => skill.name === name)),
+    require: (name) => {
+      const info = skills.find((skill) => skill.name === name)
+      if (info) return Effect.succeed(info)
+      return Effect.fail(new Skill.NotFoundError({ name, available: skills.map((skill) => skill.name) }))
+    },
+    all: () => Effect.succeed(skills),
+    dirs: () => Effect.succeed([]),
+    available: () => Effect.succeed(skills),
+  })
+
+  const compile = (flags: Partial<RuntimeFlags.Info>) =>
+    LayerNode.compile(SystemPrompt.node, [
+      [MCP.node, mcpLayer],
+      [Skill.node, skillLayer],
+      [RuntimeFlags.node, RuntimeFlags.layer(flags)],
+    ])
+
+  const itSlimming = testEffect(compile({}))
+  const itUpstream = testEffect(compile({ disableStaticSlimming: true }))
+
+  // Expected values build on upstream's server-section rendering (split +
+  // 4-space indent), which this ticket leaves untouched.
+  const section = (instructions: string) =>
+    [`  <server name="guide-server">`, ...instructions.split("\n").map((line) => `    ${line}`), "  </server>"].join(
+      "\n",
+    )
+
+  const render = (instructions: string) =>
+    ["<mcp_instructions>", section(instructions), "</mcp_instructions>"].join("\n")
+
+  const assertBothRenderers = (instructions: string) =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      const output = yield* prompt.mcp(build)
+      const blocks = yield* prompt.mcpBlocks(build)
+
+      expect(output).toBe(render(instructions))
+      expect(blocks).toEqual([{ key: "mcp:guide-server", content: section(instructions) }])
+    })
+
+  itSlimming.effect("instructions exactly 250 characters render unchanged", () =>
+    Effect.gen(function* () {
+      fixture.instructions = "x".repeat(250)
+      yield* assertBothRenderers(fixture.instructions)
+    }),
+  )
+
+  itSlimming.effect("instructions over 250 characters truncate at the last word boundary within the budget", () =>
+    Effect.gen(function* () {
+      fixture.instructions = "a".repeat(240) + " " + "b".repeat(10)
+      yield* assertBothRenderers("a".repeat(240) + "...")
+    }),
+  )
+
+  itSlimming.effect("word boundaries at the budget edge keep the result within 250 units", () =>
+    Effect.gen(function* () {
+      // space at the head's last index (247): the word cut still fits the ellipsis
+      fixture.instructions = "a".repeat(247) + " bcd"
+      yield* assertBothRenderers("a".repeat(247) + "...")
+      // space past the head: falls back to the hard cut, still within budget
+      fixture.instructions = "a".repeat(249) + " b"
+      yield* assertBothRenderers("a".repeat(247) + "...")
+    }),
+  )
+
+  itSlimming.effect("instructions over 250 characters without a space stay budget-safe", () =>
+    Effect.gen(function* () {
+      fixture.instructions = "a".repeat(251)
+      yield* assertBothRenderers("a".repeat(247) + "...")
+    }),
+  )
+
+  itSlimming.effect("multi-line instructions truncate before indentation", () =>
+    Effect.gen(function* () {
+      fixture.instructions = "Intro\n" + "a".repeat(300)
+      yield* assertBothRenderers("Intro\n" + "a".repeat(241) + "...")
+    }),
+  )
+
+  itSlimming.effect("empty instructions render unchanged", () =>
+    Effect.gen(function* () {
+      fixture.instructions = ""
+      yield* assertBothRenderers(fixture.instructions)
+    }),
+  )
+
+  itUpstream.effect("disableStaticSlimming flag set renders upstream-identical full instructions", () =>
+    Effect.gen(function* () {
+      fixture.instructions = "a".repeat(300)
+      yield* assertBothRenderers(fixture.instructions)
     }),
   )
 })
