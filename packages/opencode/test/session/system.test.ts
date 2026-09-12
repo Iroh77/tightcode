@@ -119,9 +119,9 @@ describe("session.system", () => {
 
       expect(first).toBe(second)
 
-      const alpha = output.indexOf("<name>alpha-skill</name>")
-      const middle = output.indexOf("<name>middle-skill</name>")
-      const zeta = output.indexOf("<name>zeta-skill</name>")
+      const alpha = output.indexOf("- **alpha-skill**:")
+      const middle = output.indexOf("- **middle-skill**:")
+      const zeta = output.indexOf("- **zeta-skill**:")
 
       expect(alpha).toBeGreaterThan(-1)
       expect(middle).toBeGreaterThan(alpha)
@@ -267,6 +267,92 @@ describe("SystemPrompt.mcpInstructions truncation (R11-002)", () => {
     Effect.gen(function* () {
       fixture.instructions = "a".repeat(300)
       yield* assertBothRenderers(fixture.instructions)
+    }),
+  )
+})
+
+describe("SystemPrompt.skills non-verbose (R11-003)", () => {
+  const mcpLayer = Layer.mock(MCP.Service, {
+    instructions: () => Effect.succeed([]),
+  })
+
+  const skillLayer = Layer.mock(Skill.Service, {
+    available: () => Effect.succeed(skills),
+  })
+
+  const emptySkillLayer = Layer.mock(Skill.Service, {
+    available: () => Effect.succeed([]),
+  })
+
+  const compile = (flags: Partial<RuntimeFlags.Info>, skillService = skillLayer) =>
+    LayerNode.compile(SystemPrompt.node, [
+      [MCP.node, mcpLayer],
+      [Skill.node, skillService],
+      [RuntimeFlags.node, RuntimeFlags.layer(flags)],
+    ])
+
+  const itSlimming = testEffect(compile({}))
+  const itUpstream = testEffect(compile({ disableStaticSlimming: true }))
+  const itEmpty = testEffect(compile({}, emptySkillLayer))
+
+  const intro = [
+    "Skills provide specialized instructions and workflows for specific tasks.",
+    "Use the skill tool to load a skill when a task matches its description.",
+  ]
+
+  const nonVerbose = [
+    ...intro,
+    "## Available Skills",
+    "- **alpha-skill**: Alpha skill.",
+    "- **middle-skill**: Middle skill.",
+    "- **zeta-skill**: Zeta skill.",
+  ].join("\n")
+
+  const verbose = [
+    ...intro,
+    "<available_skills>",
+    ...[
+      ["alpha-skill", "Alpha skill.", "/tmp/alpha-skill/SKILL.md"],
+      ["middle-skill", "Middle skill.", "/tmp/middle-skill/SKILL.md"],
+      ["zeta-skill", "Zeta skill.", "/tmp/zeta-skill/SKILL.md"],
+    ].flatMap(([name, description, location]) => [
+      "  <skill>",
+      `    <name>${name}</name>`,
+      `    <description>${description}</description>`,
+      `    <location>${location}</location>`,
+      "  </skill>",
+    ]),
+    "</available_skills>",
+  ].join("\n")
+
+  itSlimming.effect("skills render as non-verbose markdown without locations", () =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      expect(yield* prompt.skills(build)).toBe(nonVerbose)
+    }),
+  )
+
+  itSlimming.effect("description-less skills are filtered from the listing", () =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      const output =
+        (yield* prompt.skills(build)) ??
+        (yield* Effect.fail(new NamedError.Unknown({ message: "missing skills output" })))
+      expect(output).not.toContain("manual-skill")
+    }),
+  )
+
+  itEmpty.effect("empty skill list renders the sentinel", () =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      expect(yield* prompt.skills(build)).toBe([...intro, "No skills are currently available."].join("\n"))
+    }),
+  )
+
+  itUpstream.effect("disableStaticSlimming flag set renders the verbose XML with locations", () =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      expect(yield* prompt.skills(build)).toBe(verbose)
     }),
   )
 })
