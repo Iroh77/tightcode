@@ -48,7 +48,11 @@ export class MalformedToolEntryError extends Schema.TaggedErrorClass<MalformedTo
 // sendable; one family-agnostic constant keeps R12-009 intact (R12-003 amendment).
 export const PLACEHOLDER: JSONSchema7 = { type: "object", properties: {} }
 
-const EAGER = new Set(["shell", "read", "load_tool"])
+// R12-002 eager set, keyed by production registry ids. The shell tool's
+// exposed id is "bash" (ShellID.ToolID — kept for plugin/permission
+// compatibility, rename planned upstream), so the requirement's "shell"
+// resolves to "bash" here.
+const EAGER = new Set(["bash", "read", "load_tool"])
 
 const TRUNCATE_BOUND = 100
 

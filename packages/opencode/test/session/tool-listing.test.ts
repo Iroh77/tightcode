@@ -30,7 +30,7 @@ describe("session.tool-listing", () => {
       const long = "L".repeat(150)
       const seeds = ToolListing.shape({
         universe: [
-          def("shell", "Runs a shell command"),
+          def("bash", "Runs a shell command"),
           def("read", "Reads a file"),
           def("load_tool", "Loads a deferred tool"),
           def("glob", long),
@@ -41,7 +41,7 @@ describe("session.tool-listing", () => {
         ruleset: [],
       })
       const byName = new Map(seeds.map((seed) => [seed.name, seed]))
-      expect(byName.get("shell")?.kind).toBe("eager")
+      expect(byName.get("bash")?.kind).toBe("eager")
       expect(byName.get("read")?.kind).toBe("eager")
       expect(byName.get("load_tool")?.kind).toBe("eager")
       expect(byName.get("glob")?.kind).toBe("deferred")
@@ -51,12 +51,12 @@ describe("session.tool-listing", () => {
       // full facts: shape never truncates and never replaces the schema
       expect(byName.get("glob")?.fullDescription).toEqual(long)
       expect(byName.get("glob")?.jsonSchema).toEqual(schema("glob"))
-      expect(byName.get("shell")?.fullDescription).toEqual("Runs a shell command")
+      expect(byName.get("bash")?.fullDescription).toEqual("Runs a shell command")
       expect(byName.get("firecrawl_scrape")?.server).toBe("firecrawl")
-      expect(byName.get("shell")?.server).toBeUndefined()
+      expect(byName.get("bash")?.server).toBeUndefined()
       // input order preserved (becomes frozen insertion order downstream)
       expect(seeds.map((seed) => seed.name)).toEqual([
-        "shell",
+        "bash",
         "read",
         "load_tool",
         "glob",
@@ -69,7 +69,7 @@ describe("session.tool-listing", () => {
     test("drops blanket-denied tools in any form", () => {
       const seeds = ToolListing.shape({
         universe: [
-          def("shell", "Runs commands"),
+          def("bash", "Runs commands"),
           def("read", "Reads files"),
           def("glob", "Finds files"),
           def("edit", "Edits files"),
@@ -86,13 +86,13 @@ describe("session.tool-listing", () => {
         ],
       })
       // R12-001 dominates the eager set: a denied eager name is not listed either
-      expect(seeds.map((seed) => seed.name)).toEqual(["shell", "firecrawl_scrape"])
+      expect(seeds.map((seed) => seed.name)).toEqual(["bash", "firecrawl_scrape"])
     })
 
     test("does not mutate its input", () => {
-      const universe = [def("shell", "Runs commands"), def("glob", "Finds files")]
+      const universe = [def("bash", "Runs commands"), def("glob", "Finds files")]
       const snapshot = structuredClone(universe)
-      ToolListing.shape({ universe, ruleset: [{ permission: "shell", pattern: "*", action: "deny" }] })
+      ToolListing.shape({ universe, ruleset: [{ permission: "bash", pattern: "*", action: "deny" }] })
       expect(universe).toEqual(snapshot)
     })
 
@@ -117,13 +117,13 @@ describe("session.tool-listing", () => {
     test("advisory mode: eager full, deferred truncated with placeholder schema", () => {
       const view = ToolListing.render(
         ToolListing.shape({
-          universe: [def("shell", "Runs a shell command"), def("glob", "find files by glob patterns " + "y".repeat(80))],
+          universe: [def("bash", "Runs a shell command"), def("glob", "find files by glob patterns " + "y".repeat(80))],
           ruleset: [],
         }),
         "advisory",
       )
       expect(view).toEqual([
-        { name: "shell", description: "Runs a shell command", jsonSchema: schema("shell") },
+        { name: "bash", description: "Runs a shell command", jsonSchema: schema("bash") },
         {
           name: "glob",
           description: "find files by glob patterns...",
@@ -160,13 +160,13 @@ describe("session.tool-listing", () => {
             def("firecrawl_scrape", "Scrapes", "mcp", "firecrawl"),
             def("firecrawl_search", "Searches", "mcp", "firecrawl"),
             def("notion_search", "Searches notion", "mcp", "notion"),
-            def("shell", "Runs commands"),
+            def("bash", "Runs commands"),
           ],
           ruleset: [],
         }),
         "advisory",
       )
-      expect(view.map((entry) => entry.name)).toEqual(["firecrawl_scrape", "firecrawl_search", "notion_search", "shell"])
+      expect(view.map((entry) => entry.name)).toEqual(["firecrawl_scrape", "firecrawl_search", "notion_search", "bash"])
       expect(view[0].description).toBe("firecrawl: Scrapes")
       expect(view[1].description).toBe("Searches")
       expect(view[2].description).toBe("notion: Searches notion")
@@ -225,7 +225,7 @@ describe("session.tool-listing", () => {
 
     const seeds = ToolListing.shape({
       universe: [
-        def("shell", "Runs a shell command"),
+        def("bash", "Runs a shell command"),
         def("glob", long),
         def("firecrawl_scrape", "Scrapes a page", "mcp", "firecrawl"),
         def("firecrawl_search", "Searches the web", "mcp", "firecrawl"),
@@ -235,7 +235,7 @@ describe("session.tool-listing", () => {
 
     test("binding: every deferred entry carries its full schema; the description stays truncated", () => {
       const view = ToolListing.render(seeds, "binding")
-      expect(view[0]).toEqual({ name: "shell", description: "Runs a shell command", jsonSchema: schema("shell") })
+      expect(view[0]).toEqual({ name: "bash", description: "Runs a shell command", jsonSchema: schema("bash") })
       expect(view[1].name).toBe("glob")
       // schema-eager, description-deferred (R12-010 amendment 1)
       expect(view[1].jsonSchema).toEqual(schema("glob"))

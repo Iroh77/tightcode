@@ -66,16 +66,16 @@ describe("session.prompt-base", () => {
         const base = { sessionID: "ses_tools_freeze", model: model(), provider: provider(), mode: "advisory" as const }
         const first = yield* promptBase.reconcileTools({
           ...base,
-          seeds: [seed("shell", "eager"), seed("glob")],
+          seeds: [seed("bash", "eager"), seed("glob")],
         })
-        expect(first.appended).toEqual(["shell", "glob"])
+        expect(first.appended).toEqual(["bash", "glob"])
         expect(first.mode).toBe("advisory")
 
         // Upstream per-turn rebuilds (describeTask list, tool.definition hook,
         // MCP def refresh) feed changed facts; the frozen entries absorb them.
         const second = yield* promptBase.reconcileTools({
           ...base,
-          seeds: [seed("shell", "eager", "CHANGED description"), seed("glob", "deferred", "CHANGED description")],
+          seeds: [seed("bash", "eager", "CHANGED description"), seed("glob", "deferred", "CHANGED description")],
         })
         expect(second.appended).toEqual([])
         expect(second.entries).toEqual(first.entries)
@@ -87,12 +87,12 @@ describe("session.prompt-base", () => {
       Effect.gen(function* () {
         const promptBase = yield* PromptBase.Service
         const base = { sessionID: "ses_tools_batch", model: model(), provider: provider(), mode: "advisory" as const }
-        const first = yield* promptBase.reconcileTools({ ...base, seeds: [seed("shell", "eager"), seed("glob")] })
+        const first = yield* promptBase.reconcileTools({ ...base, seeds: [seed("bash", "eager"), seed("glob")] })
 
         const connect = yield* promptBase.reconcileTools({
           ...base,
           seeds: [
-            seed("shell", "eager"),
+            seed("bash", "eager"),
             seed("glob"),
             seed("firecrawl_scrape", "deferred", "Scrapes a page", "firecrawl"),
             seed("firecrawl_search", "deferred", "Searches the web", "firecrawl"),
@@ -100,7 +100,7 @@ describe("session.prompt-base", () => {
         })
         expect(connect.appended).toEqual(["firecrawl_scrape", "firecrawl_search"])
         expect(connect.entries.map((entry) => entry.name)).toEqual([
-          "shell",
+          "bash",
           "glob",
           "firecrawl_scrape",
           "firecrawl_search",
@@ -122,12 +122,12 @@ describe("session.prompt-base", () => {
         const base = { sessionID: "ses_tools_agent", model: model(), provider: provider(), mode: "advisory" as const }
         const first = yield* promptBase.reconcileTools({
           ...base,
-          seeds: [seed("shell", "eager"), seed("glob"), seed("task")],
+          seeds: [seed("bash", "eager"), seed("glob"), seed("task")],
         })
 
         // The switched-to agent's per-turn listing excludes task; the frozen
         // base keeps it (R12-007: revocation is enforced at execution time).
-        const switched = yield* promptBase.reconcileTools({ ...base, seeds: [seed("shell", "eager"), seed("glob")] })
+        const switched = yield* promptBase.reconcileTools({ ...base, seeds: [seed("bash", "eager"), seed("glob")] })
         expect(switched.appended).toEqual([])
         expect(switched.entries).toEqual(first.entries)
         expect(switched.entries.some((entry) => entry.name === "task")).toBe(true)
@@ -177,11 +177,11 @@ describe("session.prompt-base", () => {
       Effect.gen(function* () {
         const promptBase = yield* PromptBase.Service
         const base = { sessionID: "ses_entries", model: model(), provider: provider(), mode: "advisory" as const }
-        yield* promptBase.reconcileTools({ ...base, seeds: [seed("shell", "eager"), seed("glob")] })
+        yield* promptBase.reconcileTools({ ...base, seeds: [seed("bash", "eager"), seed("glob")] })
 
         const view = yield* promptBase.entries({ sessionID: "ses_entries", model: model(), provider: provider() })
         expect(view.mode).toBe("advisory")
-        expect(view.entries.map((entry) => entry.name)).toEqual(["shell", "glob"])
+        expect(view.entries.map((entry) => entry.name)).toEqual(["bash", "glob"])
 
         // load_tool reads the same base the request froze; another session
         // (or model/endpoint) sees nothing.

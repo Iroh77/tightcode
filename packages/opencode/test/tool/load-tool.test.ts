@@ -68,7 +68,7 @@ const ctx = (messages: SessionV1.WithParts[] = []): Tool.Context => ({
   ask: () => Effect.void,
 })
 
-// Freezes a base for the test session: eager shell, deferred glob and grep.
+// Freezes a base for the test session: eager bash, deferred glob and grep.
 const freeze = (mode: "advisory" | "binding" = "advisory") =>
   Effect.gen(function* () {
     const promptBase = yield* PromptBase.Service
@@ -79,9 +79,9 @@ const freeze = (mode: "advisory" | "binding" = "advisory") =>
       mode,
       seeds: [
         {
-          name: "shell",
+          name: "bash",
           kind: "eager",
-          fullDescription: "shell full description",
+          fullDescription: "bash full description",
           jsonSchema: { type: "object", properties: {} },
         },
         {
@@ -236,17 +236,17 @@ describe("tool.load-tool", () => {
       const unknown = yield* tool.execute({ tools: ["bogus"] }, ctx())
       expect(unknown.output).toContain("bogus: unknown tool. Loadable tools: glob, grep")
 
-      const eager = yield* tool.execute({ tools: ["shell"] }, ctx())
-      expect(eager.output).toContain("shell: already fully listed in the tool listing.")
+      const eager = yield* tool.execute({ tools: ["bash"] }, ctx())
+      expect(eager.output).toContain("bash: already fully listed in the tool listing.")
 
       const empty = yield* tool.execute({ tools: [] }, ctx())
       expect(empty.output).toContain("No tool names provided.")
       expect(empty.metadata.load_tool).toBeUndefined()
 
       // Nothing fatal: errors are per-name output lines, the call completes.
-      const mixed = yield* tool.execute({ tools: ["bogus", "shell", "glob"] }, ctx())
+      const mixed = yield* tool.execute({ tools: ["bogus", "bash", "glob"] }, ctx())
       expect(mixed.output).toContain("bogus: unknown tool")
-      expect(mixed.output).toContain("shell: already fully listed")
+      expect(mixed.output).toContain("bash: already fully listed")
       expect(mixed.output).toContain("### glob")
       expect(mixed.metadata.load_tool).toEqual({ tools: ["glob"] })
     }),
