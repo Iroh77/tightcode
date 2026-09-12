@@ -1,4 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Global } from "@opencode-ai/core/global"
 import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Provider } from "@/provider/provider"
@@ -76,6 +77,7 @@ const live: Layer.Layer<
   | LLMClientService
   | RuntimeFlags.Service
   | PromptBase.Service
+  | Global.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -88,6 +90,7 @@ const live: Layer.Layer<
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
     const promptBase = yield* PromptBase.Service
+    const global = yield* Global.Service
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       yield* Effect.logInfo("stream", {
@@ -117,6 +120,7 @@ const live: Layer.Layer<
         plugin,
         promptBase,
         flags,
+        data: global.data,
         isWorkflow,
       })
 
@@ -407,6 +411,8 @@ export const node = LayerNode.make({
     llmClient,
     RuntimeFlags.node,
     PromptBase.node,
+    // prepare's gated capture sink reads the data dir (R10-001)
+    Global.node,
   ],
 })
 

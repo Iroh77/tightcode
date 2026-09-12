@@ -107,6 +107,7 @@ const prepareWith = (input: {
       plugin,
       promptBase: input.promptBase,
       flags: input.flags,
+      data: "/tmp",
       isWorkflow: false,
     })
   })

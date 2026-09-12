@@ -589,6 +589,7 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
           entries: () => Effect.succeed({ entries: [], mode: undefined }),
         },
         flags: { outputTokenMax: 32_000, client: "test" } as any,
+        data: "/tmp",
         isWorkflow: false,
       }),
     )

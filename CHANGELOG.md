@@ -24,3 +24,7 @@ Scaffold — fork of `anomalyco/opencode@bbd72fb8b` (dev) as TightCode.
 ### Added (tool lazy loading — R12, integration)
 
 - `test(core-lazy)`: end-to-end integration test (ticket 08) — a real prompt loop against the scripted fixture provider proves the feature's core promise at the outgoing payload across module seams: system+tools prefix byte-stable across consecutive turns (R12-008), deferred entries stay truncated-description + placeholder even after the schema reached the model via history (R12-003/005), `load_tool` full serve → confirmations and an unloaded failing call recovering with the schema in its error output (R12-004/006), binding-mode session listing full schemas with description-only serves (R12-010).
+
+### Added (context observability — R10)
+
+- `feat(observability)`: prompt capture end-to-end (ticket 13) — opt-in `OPENCODE_ENABLE_PROMPT_CAPTURE` (default off = upstream-identical, R10-001/R00-013 capture axis) writes one credential-free JSON dump per provider turn to `Global.data/prompt-captures/<sessionID>/<seq:0000>.json`; whitelist envelope `{meta, payload:{system, tools, messages}}` keeps `params`/`messageTransformOptions`/`headers` out by construction (R10-002); stateless seq re-derived by dir scan on resume; tool entries projected to raw `jsonSchema()` payloads with `strict` passthrough, a non-wrapper inputSchema skips that turn's dump (logged); any dump failure is logged and swallowed — the provider turn never breaks (R00-010).

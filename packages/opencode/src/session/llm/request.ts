@@ -12,6 +12,7 @@ import { SystemPrompt } from "../system"
 import { ToolListing, type FrozenToolEntry, type ToolSeed, type Verdict } from "@/session/tool-listing"
 import { PromptBase } from "./prompt-base"
 import type { SystemBlock } from "./prompt-base"
+import { PromptCapture } from "./prompt-capture"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
@@ -38,6 +39,10 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly promptBase: PromptBase.Interface
   readonly flags: RuntimeFlags.Info
+  // App data dir, captured at the LLM layer build (Global is a build-time
+  // dependency there, not a runtime service — the capture sink must not add
+  // one to the per-turn context).
+  readonly data: string
   readonly isWorkflow: boolean
 }
 
@@ -245,7 +250,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
-  return {
+  const prepared = {
     system,
     messages,
     tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
@@ -270,6 +275,28 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       ...headers,
     },
   }
+  // Gated at the call site (decision context-observability-01): flag off = no
+  // IO. The dump sees the exact returned object (SC-1).
+  if (input.flags.enablePromptCapture)
+    yield* PromptCapture.dump({
+      data: input.data,
+      prepared,
+      meta: {
+        sessionID: input.sessionID,
+        parentSessionID: input.parentSessionID,
+        providerID: input.provider.id,
+        modelID: input.model.id,
+        modelApi: input.model.api.npm,
+        agent: input.agent.name,
+        small: input.small ?? false,
+        requestID: input.user.id,
+        optimized: {
+          lazyTools: !input.flags.disableLazyTools,
+          staticSlimming: !input.flags.disableStaticSlimming,
+        },
+      },
+    })
+  return prepared
 })
 
 function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {

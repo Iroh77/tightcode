@@ -19,6 +19,10 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),
   disableLazyTools: bool("OPENCODE_DISABLE_LAZY_TOOLS"),
   disableStaticSlimming: bool("OPENCODE_DISABLE_STATIC_SLIMMING"),
+  // Capture is opt-in observability (R10-001), not an optimized axis: its
+  // default state (off) IS the upstream-identical one, so no disable flag
+  // exists (decision context-observability-01).
+  enablePromptCapture: bool("OPENCODE_ENABLE_PROMPT_CAPTURE"),
   disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
   disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
   disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
