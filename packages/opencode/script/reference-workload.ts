@@ -116,6 +116,14 @@ const childEnv = (input: { runDir: string; proxy: boolean }): Record<string, str
     const value = process.env[key]
     if (value) env[key] = value
   }
+  // Credential passthrough: provider + MCP keys from the operator shell, when
+  // set. Identical for both legs (fair comparison); never written to the run
+  // config, the manifest, or the repo. Needed so MCP legs interpolate
+  // `{env:...}` keys in the child like the operator's real setup does.
+  for (const key of ["OPENROUTER_API_KEY", "FIRECRAWL_API_KEY", "FAL_AI_API_KEY", "N8N_MCP_TOKEN"]) {
+    const value = process.env[key]
+    if (value) env[key] = value
+  }
   if (input.proxy) {
     env.OPENCODE_DISABLE_LAZY_TOOLS = "1"
     env.OPENCODE_DISABLE_STATIC_SLIMMING = "1"

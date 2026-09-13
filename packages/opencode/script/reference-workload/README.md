@@ -48,10 +48,13 @@ Run dir layout:
 
 Isolation notes: the subprocess env is an allowlist (`PATH`, `HOME`, the
 driver-set `XDG_*`/`OPENCODE_*` values, proxy vars) so operator-shell
-`XDG_*`/`OPENCODE_*` cannot leak into a leg; prompts chain into one session via
-`opencode run --continue` in the fresh data dir. The operator's global config
-at `$HOME/.config/opencode` is still read by both legs — keep it neutral, and
-run both legs from the same shell.
+`XDG_*`/`OPENCODE_*` cannot leak into a leg. A fixed credential list
+(`OPENROUTER_API_KEY`, `FIRECRAWL_API_KEY`, `FAL_AI_API_KEY`, `N8N_MCP_TOKEN`)
+passes through when set in the operator shell — identical for both legs, never
+written to the run config, the manifest, or the repo. Prompts chain into one
+session via `opencode run --continue` in the fresh data dir. The operator's
+global config at `$HOME/.config/opencode` is still read by both legs — keep it
+neutral, and run both legs from the same shell.
 
 ## Baseline procedure (first R10-005 measurement)
 
