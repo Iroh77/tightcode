@@ -14,7 +14,7 @@ import type { CaptureFile } from "../src/session/llm/prompt-capture"
 
 // The manifest is the driver's output (ticket 15); the reader validates this
 // exact shape so report/diff inputs stay honest.
-const RunManifestSchema = Schema.Struct({
+export const RunManifestSchema = Schema.Struct({
   bin: Schema.String,
   modelID: Schema.String,
   providerID: Schema.String,
