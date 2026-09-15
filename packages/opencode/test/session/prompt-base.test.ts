@@ -50,11 +50,18 @@ const toolSchema = (label: string): JSONSchema7 => ({
   required: ["label"],
 })
 
-const seed = (name: string, kind: "eager" | "deferred" = "deferred", description?: string, server?: string): ToolSeed => ({
+const seed = (
+  name: string,
+  kind: "eager" | "deferred" = "deferred",
+  description?: string,
+  server?: string,
+  source: ToolSeed["source"] = "builtin",
+): ToolSeed => ({
   name,
   kind,
   fullDescription: description ?? `${name} description`,
   jsonSchema: toolSchema(name),
+  source,
   ...(server ? { server } : {}),
 })
 
@@ -319,6 +326,54 @@ describe("session.prompt-base", () => {
     }),
   )
 
+  it.instance("catalog keys freeze on first write; re-emission is a no-op; a late connect appends with its entry batch", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = { sessionID: "ses_catalog", model: model(), provider: provider() }
+      const block = { key: "catalog" as const, content: "<deferred_tools>\n- glob: Finds files\n</deferred_tools>" }
+      const turn1 = yield* promptBase.reconcileSystem({ ...base, blocks: [{ key: "environment", content: "env" }, block] })
+      expect(turn1.appended).toEqual(["environment", "catalog"])
+
+      // the producer is stateless: every wrapper turn re-emits the same
+      // catalog blocks and the frozen base absorbs them (first-write-wins)
+      const turn2 = yield* promptBase.reconcileSystem({ ...base, blocks: [{ key: "environment", content: "env" }, block] })
+      expect(turn2.appended).toEqual([])
+      expect(turn2.blocks).toEqual(turn1.blocks)
+
+      // late MCP connect on a wrapper session: the new server's catalog block
+      // is a new key appended in the same turn as its tool-entry batch (one
+      // event, one deliberate cache invalidation, R12-008)
+      yield* promptBase.reconcileTools({
+        ...base,
+        mode: "binding" as const,
+        wrapper: true,
+        seeds: [seed("firecrawl_scrape", "deferred", "Scrapes a page", "firecrawl", "mcp")],
+      })
+      const connect = yield* promptBase.reconcileSystem({
+        ...base,
+        blocks: [
+          { key: "environment", content: "env" },
+          block,
+          { key: "catalog:firecrawl", content: '<deferred_tools server="firecrawl">\n- firecrawl_scrape: Scrapes a page\n</deferred_tools>' },
+        ],
+      })
+      expect(connect.appended).toEqual(["catalog:firecrawl"])
+      expect(connect.blocks.some((b) => b.key === "catalog:firecrawl")).toBe(true)
+
+      // a later turn re-emits everything; the frozen catalog stays byte-stable
+      const turn4 = yield* promptBase.reconcileSystem({
+        ...base,
+        blocks: [
+          { key: "environment", content: "env" },
+          block,
+          { key: "catalog:firecrawl", content: '<deferred_tools server="firecrawl">\n- firecrawl_scrape: Scrapes a page\n</deferred_tools>' },
+        ],
+      })
+      expect(turn4.appended).toEqual([])
+      expect(turn4.blocks).toEqual(connect.blocks)
+    }),
+  )
+
   it.instance("freezes per sessionID and provider/model/endpoint", () =>
     Effect.gen(function* () {
       const promptBase = yield* PromptBase.Service
@@ -461,6 +516,47 @@ describe("session.prompt-base", () => {
       expect(one[0]).toEqual(two[0])
       expect(one[1]).toEqual(two[1])
       expect(one[3]).toEqual(two[3])
+    })
+
+    test("projects the catalog slot after skills and before per-turn keys (R12-012, ticket 18)", () => {
+      const rendered = PromptBase.render([
+        { key: "environment", content: "env" },
+        { key: "instructions", content: "instr" },
+        { key: "mcp:alpha", content: section("alpha", "Alpha.") },
+        { key: "skills", content: "skills" },
+        { key: "catalog", content: "<deferred_tools>\n- glob: Finds files\n</deferred_tools>" },
+        { key: "catalog:firecrawl", content: '<deferred_tools server="firecrawl">\n- firecrawl_scrape: Scrapes\n</deferred_tools>' },
+        { key: "structured_output", content: "structured" },
+      ])
+      expect(rendered).toEqual([
+        "env",
+        "instr",
+        ["<mcp_instructions>", section("alpha", "Alpha."), "</mcp_instructions>"].join("\n"),
+        "skills",
+        "<deferred_tools>\n- glob: Finds files\n</deferred_tools>",
+        '<deferred_tools server="firecrawl">\n- firecrawl_scrape: Scrapes\n</deferred_tools>',
+        "structured",
+      ])
+    })
+
+    test("catalog blocks carry their own delimiters and render in frozen append order, not key-sorted", () => {
+      const rendered = PromptBase.render([
+        { key: "environment", content: "env" },
+        { key: "catalog:zeta", content: "zeta-block" },
+        { key: "catalog", content: "plain-block" },
+        { key: "structured_output", content: "structured" },
+      ])
+      expect(rendered).toEqual(["env", "zeta-block", "plain-block", "structured"])
+    })
+
+    test("sessions without catalog keys render round-1 bytes exactly", () => {
+      const rendered = PromptBase.render([
+        { key: "environment", content: "env" },
+        { key: "instructions", content: "instr" },
+        { key: "skills", content: "skills" },
+        { key: "structured_output", content: "structured" },
+      ])
+      expect(rendered).toEqual(["env", "instr", "skills", "structured"])
     })
   })
 })

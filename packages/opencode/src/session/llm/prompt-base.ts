@@ -4,7 +4,16 @@ import type { Provider } from "@/provider/provider"
 import type { FrozenToolEntry, ToolSeed, Verdict } from "@/session/tool-listing"
 import { Context, Effect, Layer, Schema } from "effect"
 
-export type SystemBlockKey = "environment" | "instructions" | `mcp:${string}` | "skills" | "structured_output"
+export type SystemBlockKey =
+  | "environment"
+  | "instructions"
+  | `mcp:${string}`
+  | "skills"
+  // Catalog family (R12-012, fork-invented — no upstream bytes): the
+  // deferred-tool discovery blocks written only on binding+wrapper sessions.
+  | "catalog"
+  | `catalog:${string}`
+  | "structured_output"
 
 export type SystemBlock = { key: SystemBlockKey; content: string }
 
@@ -20,6 +29,9 @@ export class DuplicateToolEntryError extends Schema.TaggedErrorClass<DuplicateTo
 
 const isMcp = (key: SystemBlockKey): key is `mcp:${string}` => key.startsWith("mcp:")
 
+const isCatalog = (key: SystemBlockKey): key is "catalog" | `catalog:${string}` =>
+  key === "catalog" || key.startsWith("catalog:")
+
 // Per-message conditionals are outside the frozen prompt base (decision
 // tool-lazy-loading-01): they are rendered per turn, never frozen.
 const PER_TURN = new Set<SystemBlockKey>(["structured_output"])
@@ -34,14 +46,18 @@ const endpoint = (input: { model: Provider.Model; provider: Provider.Info }) => 
 const stateKey = (input: { sessionID: string; model: Provider.Model; provider: Provider.Info }) =>
   `${input.sessionID}:${input.model.providerID}/${input.model.id}/${endpoint(input)}`
 
-// Canonical upstream ordering: environment, instructions, mcp group, skills,
-// structured_output (SC-2). Projecting by key class keeps the rendered bytes
-// independent of the frozen array's append order.
+// Canonical ordering: environment, instructions, mcp group, skills, catalog
+// blocks, structured_output (SC-2). Catalog blocks are the R12-012 discovery
+// family (fork-invented): they project after skills and before per-turn keys,
+// in frozen append order; sessions without catalog keys render round-1 bytes
+// exactly. Projecting by key class keeps the rendered bytes independent of
+// the frozen array's append order for the fixed slots.
 export const render = (blocks: SystemBlock[]): string[] => {
   const environment = blocks.find((block) => block.key === "environment")
   const instructions = blocks.find((block) => block.key === "instructions")
   const mcp = blocks.filter((block) => isMcp(block.key))
   const skills = blocks.find((block) => block.key === "skills")
+  const catalog = blocks.filter((block) => isCatalog(block.key))
   const perTurn = blocks.filter((block) => PER_TURN.has(block.key))
   return [
     environment?.content,
@@ -50,6 +66,7 @@ export const render = (blocks: SystemBlock[]): string[] => {
       ? ["<mcp_instructions>", ...mcp.map((block) => block.content), "</mcp_instructions>"].join("\n")
       : undefined,
     skills?.content,
+    ...catalog.map((block) => block.content),
     ...perTurn.map((block) => block.content),
   ].filter((entry): entry is string => entry !== undefined)
 }

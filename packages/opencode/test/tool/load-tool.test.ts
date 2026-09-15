@@ -84,6 +84,7 @@ const freeze = (mode: "advisory" | "binding" = "advisory", wrapper = false) =>
           kind: "eager",
           fullDescription: "bash full description",
           jsonSchema: { type: "object", properties: {} },
+          source: "builtin",
         },
         {
           name: "glob",
@@ -94,12 +95,14 @@ const freeze = (mode: "advisory" | "binding" = "advisory", wrapper = false) =>
             properties: { pattern: { type: "string", description: "The glob pattern" } },
             required: ["pattern"],
           },
+          source: "builtin",
         },
         {
           name: "grep",
           kind: "deferred",
           fullDescription: "grep full description",
           jsonSchema: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
+          source: "builtin",
         },
       ],
     })

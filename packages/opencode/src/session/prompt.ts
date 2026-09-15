@@ -56,6 +56,7 @@ import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
+import { ToolListing } from "./tool-listing"
 import { BindingVerdict } from "./binding-verdict"
 import { LLMEvent } from "@opencode-ai/llm"
 
@@ -1273,6 +1274,10 @@ const layer = Layer.effect(
                 : []),
               ...mcpBlocks,
               ...(skills ? [{ key: "skills" as const, content: skills }] : []),
+              // R12-012: deferred-tool discovery rides the system region, only
+              // on binding+wrapper sessions (advisory/kill-switch sessions
+              // never produce catalog keys — round-1 bytes unchanged).
+              ...(resolved.wrapper ? ToolListing.catalogBlocks({ seeds: resolved.seeds }) : []),
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema")

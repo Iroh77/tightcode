@@ -175,11 +175,18 @@ describe("session.llm-request-prep.tool-freeze", () => {
     required: ["label"],
   })
 
-  const seed = (name: string, kind: "eager" | "deferred" = "deferred", description?: string, server?: string): ToolSeed => ({
+  const seed = (
+    name: string,
+    kind: "eager" | "deferred" = "deferred",
+    description?: string,
+    server?: string,
+    source: ToolSeed["source"] = "builtin",
+  ): ToolSeed => ({
     name,
     kind,
     fullDescription: description ?? `${name} description`,
     jsonSchema: toolSchema(name),
+    source,
     ...(server ? { server } : {}),
   })
 
@@ -538,11 +545,18 @@ describe("session.llm-request-prep.wrapper-payload (R12-012, ticket 17)", () => 
     required: ["label"],
   })
 
-  const seed = (name: string, kind: "eager" | "deferred" = "deferred", description?: string, server?: string): ToolSeed => ({
+  const seed = (
+    name: string,
+    kind: "eager" | "deferred" = "deferred",
+    description?: string,
+    server?: string,
+    source: ToolSeed["source"] = "builtin",
+  ): ToolSeed => ({
     name,
     kind,
     fullDescription: description ?? `${name} description`,
     jsonSchema: toolSchema(name),
+    source,
     ...(server ? { server } : {}),
   })
 

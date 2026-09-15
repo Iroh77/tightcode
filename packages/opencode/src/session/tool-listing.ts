@@ -4,6 +4,7 @@ import type { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { ToolExecutionOptions } from "ai"
 import { Effect, Schema } from "effect"
 import type { EffectBridge } from "@/effect/bridge"
+import type { SystemBlock } from "@/session/llm/prompt-base"
 import type { SessionProcessor } from "@/session/processor"
 import { delivered } from "@/tool/load_tool"
 import { Tool } from "@/tool/tool"
@@ -26,12 +27,15 @@ export type UniverseTool = {
 // description and the full (model-sanitized) schema so that frozen entries
 // stay mode-independent — the advisory placeholder must never overwrite the
 // only copy the frozen base holds (load_tool re-serves it, R12-004/R12-005).
+// `source` rides additively (frozen with the entry): the catalog producer's
+// grouping key (R12-012).
 export type ToolSeed = {
   name: string
   kind: "eager" | "deferred"
   fullDescription: string
   jsonSchema: JSONSchema7
   server?: string
+  source: (typeof SOURCES)[number]
 }
 
 // Frozen at first write; never mutated (R12-007).
@@ -80,6 +84,7 @@ export const shape = (input: { universe: UniverseTool[]; ruleset: PermissionV1.R
       kind: EAGER.has(tool.name) ? ("eager" as const) : ("deferred" as const),
       fullDescription: tool.description,
       jsonSchema: tool.jsonSchema,
+      source: tool.source,
       ...(tool.server !== undefined ? { server: tool.server } : {}),
     }))
 }
@@ -117,6 +122,39 @@ export const render = (entries: FrozenToolEntry[], mode: Verdict, wrapper: boole
     })
   }
   return views
+}
+
+// R12-012 discovery: the deferred-tool catalog blocks, produced purely per
+// turn from the seeds (only wrapper sessions assemble them — prompt.ts gates
+// on wrapperActive; advisory/kill-switch sessions never produce catalog keys).
+// Grouping by the seed's source: mcp → `catalog:<server>` (one block per
+// server), resource → "catalog:resources", everything else → "catalog".
+// Each block carries its own <deferred_tools> delimiters; bullets are
+// `- name: truncate100(description)` in seed (frozen-append) order, the name
+// alone when the description is empty. No server description prefix inside a
+// block — the block is the grouping (R12-003's prefix-once governs listing
+// entries, which do not exist for deferred tools in this mode). reconcileSystem's
+// first-write-wins turns re-emission into a no-op and a late MCP connect into
+// a new-key append (one batch per event, R12-008). The how-to-call instruction
+// lives in deferred_tool's description, never in a block — blocks stay pure
+// listings and never mutate.
+export const catalogBlocks = (input: { seeds: ToolSeed[] }): SystemBlock[] => {
+  const groups = new Map<string, { key: SystemBlock["key"]; server?: string; bullets: string[] }>()
+  for (const seed of input.seeds) {
+    if (seed.kind !== "deferred") continue
+    if (seed.source === "mcp" && seed.server === undefined)
+      throw new MalformedToolEntryError({ name: seed.name, reason: "an mcp seed must carry its server for catalog grouping" })
+    const server = seed.source === "mcp" ? seed.server : undefined
+    const key: SystemBlock["key"] = server !== undefined ? `catalog:${server}` : seed.source === "resource" ? "catalog:resources" : "catalog"
+    const group = groups.get(key) ?? { key, server, bullets: [] }
+    const description = truncate100(seed.fullDescription)
+    group.bullets.push(description === "" ? `- ${seed.name}` : `- ${seed.name}: ${description}`)
+    groups.set(key, group)
+  }
+  return [...groups.values()].map((group) => ({
+    key: group.key,
+    content: [`<deferred_tools${group.server ? ` server="${group.server}"` : ""}>`, ...group.bullets, "</deferred_tools>"].join("\n"),
+  }))
 }
 
 function validate(universe: UniverseTool[]) {

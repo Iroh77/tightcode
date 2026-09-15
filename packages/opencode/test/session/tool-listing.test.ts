@@ -220,7 +220,10 @@ describe("session.tool-listing", () => {
         def("tool_e", "Custom", "custom"),
       ]
       const seeds = ToolListing.shape({ universe, ruleset: [] })
-      expect(Object.keys(seeds[0]).toSorted()).toEqual(["fullDescription", "jsonSchema", "kind", "name"])
+      expect(Object.keys(seeds[0]).toSorted()).toEqual(["fullDescription", "jsonSchema", "kind", "name", "source"])
+      // the source rides the seed (frozen with the entry) so the catalog
+      // producer can group without a universe re-read
+      expect(seeds.map((seed) => seed.source)).toEqual(["builtin", "resource", "mcp", "plugin", "custom"])
       const view = ToolListing.render(seeds, "advisory", false)
       for (const entry of view) {
         expect(Object.keys(entry).toSorted()).toEqual(["description", "jsonSchema", "name"])
@@ -327,6 +330,97 @@ describe("session.tool-listing", () => {
       expect(restored[3].description).toBe("Searches the web")
     })
   })
+
+  describe("catalogBlocks (R12-012 discovery, ticket 18)", () => {
+    // Grouping fixtures in seed order: two builtin-deferred, one custom, one
+    // resource, two firecrawl, one notion — the same seed order the frozen
+    // append produces.
+    const catalogSeeds = ToolListing.shape({
+      universe: [
+        def("glob", "Finds files " + "x".repeat(100)),
+        def("task", "", "custom"),
+        def("list_mcp_resources", "Lists resources", "resource"),
+        def("firecrawl_scrape", "Scrapes a page", "mcp", "firecrawl"),
+        def("firecrawl_search", "Searches the web", "mcp", "firecrawl"),
+        def("notion_search", "Searches notion", "mcp", "notion"),
+      ],
+      ruleset: [],
+    })
+
+    test("groups deferred seeds by source into the three-key family in first-appearance order", () => {
+      const blocks = ToolListing.catalogBlocks({ seeds: catalogSeeds })
+      expect(blocks.map((block) => block.key)).toEqual([
+        "catalog",
+        "catalog:resources",
+        "catalog:firecrawl",
+        "catalog:notion",
+      ])
+    })
+
+    test("block content is byte-exact: own delimiters, name + truncated description bullets, seed order", () => {
+      const blocks = ToolListing.catalogBlocks({ seeds: catalogSeeds })
+      const long = "Finds files " + "x".repeat(100)
+      // no server description prefix inside blocks — the block is the grouping
+      // (R12-003's prefix-once governs listing entries, absent in this mode)
+      expect(blocks[0]).toEqual({
+        key: "catalog",
+        content: `<deferred_tools>\n- glob: ${long.slice(0, long.lastIndexOf(" "))}...\n- task\n</deferred_tools>`,
+      })
+      expect(blocks[1]).toEqual({
+        key: "catalog:resources",
+        content: "<deferred_tools>\n- list_mcp_resources: Lists resources\n</deferred_tools>",
+      })
+      // one block per server; only mcp blocks carry the server attribute
+      expect(blocks[2]).toEqual({
+        key: "catalog:firecrawl",
+        content:
+          '<deferred_tools server="firecrawl">\n- firecrawl_scrape: Scrapes a page\n- firecrawl_search: Searches the web\n</deferred_tools>',
+      })
+      expect(blocks[3]).toEqual({
+        key: "catalog:notion",
+        content: '<deferred_tools server="notion">\n- notion_search: Searches notion\n</deferred_tools>',
+      })
+    })
+
+    test("empty description renders the name alone", () => {
+      const blocks = ToolListing.catalogBlocks({
+        seeds: ToolListing.shape({ universe: [def("bare", "")], ruleset: [] }),
+      })
+      expect(blocks).toEqual([{ key: "catalog", content: "<deferred_tools>\n- bare\n</deferred_tools>" }])
+    })
+
+    test("empty groups emit nothing; zero deferred seeds produce no blocks", () => {
+      // no resource seeds → no catalog:resources key; no mcp seeds → no per-server keys
+      const builtinOnly = ToolListing.catalogBlocks({
+        seeds: ToolListing.shape({ universe: [def("glob", "Finds files")], ruleset: [] }),
+      })
+      expect(builtinOnly.map((block) => block.key)).toEqual(["catalog"])
+      // eager-only seed list (e.g. a wrapper session with no deferred tools at
+      // first write) emits nothing at all
+      const eagerOnly = ToolListing.catalogBlocks({
+        seeds: ToolListing.shape({ universe: [def("bash", "Runs commands"), def("deferred_tool", "Execute a deferred tool")], ruleset: [] }),
+      })
+      expect(eagerOnly).toEqual([])
+    })
+
+    test("eager seeds never enter a catalog block (the meta-tool is not its own discovery)", () => {
+      const blocks = ToolListing.catalogBlocks({
+        seeds: ToolListing.shape({ universe: [def("deferred_tool", "Execute a deferred tool"), def("glob", "Finds files")], ruleset: [] }),
+      })
+      expect(blocks).toEqual([{ key: "catalog", content: "<deferred_tools>\n- glob: Finds files\n</deferred_tools>" }])
+    })
+
+    test("pure and stateless: same input → identical blocks, input seeds unmutated", () => {
+      const snapshot = structuredClone(catalogSeeds)
+      expect(ToolListing.catalogBlocks({ seeds: catalogSeeds })).toEqual(ToolListing.catalogBlocks({ seeds: catalogSeeds }))
+      expect(catalogSeeds).toEqual(snapshot)
+    })
+
+    test("an mcp seed without a server raises instead of silently regrouping", () => {
+      const orphan = { ...ToolListing.shape({ universe: [def("srv_tool", "Does things", "mcp", "srv")], ruleset: [] })[0], server: undefined }
+      expect(() => ToolListing.catalogBlocks({ seeds: [orphan] })).toThrow(MalformedToolEntryError)
+    })
+  })
 })
 
 describe("session.tool-listing withFallback (R12-006)", () => {
@@ -335,6 +429,7 @@ describe("session.tool-listing withFallback (R12-006)", () => {
     kind: "deferred",
     fullDescription: "glob full description",
     jsonSchema: schema("glob"),
+    source: "builtin",
   }
 
   const sessionID = SessionID.make("ses_fallback")
