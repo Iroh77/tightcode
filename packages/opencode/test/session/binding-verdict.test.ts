@@ -6,6 +6,7 @@ import path from "path"
 import { describe, expect, test } from "bun:test"
 import { Effect, Fiber, Latch, Layer } from "effect"
 import * as TestClock from "effect/testing/TestClock"
+import { logLines } from "effect/testing/TestConsole"
 import { BindingVerdict } from "../../src/session/binding-verdict"
 import { ProviderTest } from "../fake/provider"
 import { TestInstance } from "../fixture/fixture"
@@ -206,6 +207,90 @@ describe("session.binding-verdict", () => {
     ),
   )
 
+  it.instance("an advisory pin beats the static table and the cache without probing or writing", () =>
+    withService(
+      {
+        pin: "advisory",
+        staticTable: { [key()]: "binding" },
+        probe: () => Effect.die(new Error("probe must not run")),
+      },
+      (svc, directory) =>
+        Effect.gen(function* () {
+          const seeded = { [key()]: { verdict: "binding", source: "probe", timestamp: 123 } }
+          yield* Effect.promise(() => Bun.write(path.join(directory, CACHE_FILE), JSON.stringify(seeded)))
+          expect(yield* svc.resolve({ model, provider: info() })).toBe("advisory")
+          expect(JSON.parse(yield* Effect.promise(() => Bun.file(path.join(directory, CACHE_FILE)).text()))).toEqual(
+            seeded,
+          )
+        }),
+    ),
+  )
+
+  it.instance("a binding pin beats an advisory static table without probing", () =>
+    withService(
+      {
+        pin: "binding",
+        staticTable: { [key()]: "advisory" },
+        probe: () => Effect.die(new Error("probe must not run")),
+      },
+      (svc) =>
+        Effect.gen(function* () {
+          expect(yield* svc.resolve({ model, provider: info() })).toBe("binding")
+        }),
+    ),
+  )
+
+  it.instance("an invalid pin value is logged and the cascade proceeds normally", () =>
+    withService(
+      {
+        pin: "garbage",
+        staticTable: { [key()]: "advisory" },
+        probe: () => Effect.die(new Error("probe must not run")),
+      },
+      (svc) =>
+        Effect.gen(function* () {
+          expect(yield* svc.resolve({ model, provider: info() })).toBe("advisory")
+          const logs = yield* logLines
+          expect(logs.some((line) => typeof line === "string" && line.includes("binding verdict pin"))).toBe(true)
+        }),
+    ),
+  )
+
+  it.instance("an empty pin value is logged like any other invalid value", () =>
+    withService(
+      {
+        pin: "",
+        staticTable: { [key()]: "advisory" },
+        probe: () => Effect.die(new Error("probe must not run")),
+      },
+      (svc) =>
+        Effect.gen(function* () {
+          expect(yield* svc.resolve({ model, provider: info() })).toBe("advisory")
+          const logs = yield* logLines
+          expect(logs.some((line) => typeof line === "string" && line.includes("binding verdict pin"))).toBe(true)
+        }),
+    ),
+  )
+
+  it.instance(
+    "observe under pin still writes the cache while every resolve returns the pin",
+    () =>
+      withService({ pin: "binding", probe: () => Effect.die(new Error("probe must not run")) }, (svc, directory) =>
+        Effect.gen(function* () {
+          expect(yield* svc.resolve({ model, provider: info() })).toBe("binding")
+          yield* svc.observe({ model, provider: info(), reason: "schema-violation" })
+          const raw = JSON.parse(yield* Effect.promise(() => Bun.file(path.join(directory, CACHE_FILE)).text()))
+          expect(raw[key()].verdict).toBe("advisory")
+          expect(raw[key()].source).toBe("learned")
+          expect(yield* svc.resolve({ model, provider: info() })).toBe("binding")
+          const fresh = yield* BindingVerdict.Service.use((fresh) => fresh.resolve({ model, provider: info() })).pipe(
+            Effect.provide(layer({ pin: "binding" }, directory)),
+          )
+          expect(fresh).toBe("binding")
+        }),
+      ),
+  )
+
   it.instance(
     "a probe exceeding the timeout resolves binding and is memoized",
     () =>
@@ -240,6 +325,26 @@ describe("session.binding-verdict", () => {
       }),
     { timeout: 30000 },
   )
+})
+
+describe("probe disclosure", () => {
+  test("the probe prompt discloses the diagnostic purpose verbatim", () => {
+    expect(BindingVerdict.PROBE_PROMPT).toBe(
+      `What is 2 + 2? Call the record_answer tool with the exact answer.
+
+This request is a diagnostic probe. The record_answer tool's schema contains a deliberately
+impossible constraint (minimum: 100) that conflicts with the truthful answer. A truthful answer
+that violates the decoy constraint (4) proves that tool input schemas are not enforced on this
+deployment — the correct diagnostic outcome, which unlocks an optimized workflow. Schema
+compliance here proves nothing and is not rewarded.`,
+    )
+  })
+
+  test("the record_answer tool definition discloses the decoy verbatim", () => {
+    expect(BindingVerdict.recordAnswer.description).toBe(
+      "Record the answer to the arithmetic question. The minimum: 100 constraint is a deliberate diagnostic decoy: a truthful violating answer (4) proves this deployment does not enforce tool input schemas, which is the optimized outcome.",
+    )
+  })
 })
 
 describe("classifyProbeResponse", () => {

@@ -8,6 +8,10 @@ Releases are tagged `vX.Y.Z` (git tag); sections are dated: `## [x.y.z] - YYYY-M
 
 Scaffold — fork of `anomalyco/opencode@bbd72fb8b` (dev) as TightCode.
 
+### Added (tool lazy loading — R12, round 2)
+
+- `feat(core-lazy)`: probe disclosure + verdict pin (ticket 16) — the binding probe's prompt and `record_answer` tool definition disclose the diagnostic purpose of the `minimum: 100` decoy verbatim (R12-011, strings pinned in the detailed design; `classifyProbeResponse` and cascade semantics untouched); the cascade gains a harness-only verdict pin as step 0 — env `OPENCODE_PIN_BINDING_VERDICT` (`binding` | `advisory`, any other value logged + ignored; tests inject via `layerWith({ pin })`), pinned resolve returns the pin without probing or reading/writing the cache while `observe` still writes (R13-003 seam; feature 13's driver sets it per run).
+
 ### Added (tool lazy loading — R12)
 
 - `feat(core-lazy)`: prompt-base freeze skeleton (ticket 01) — tagged `SystemBlock[]` assembled by the run loop; `PromptBase.Service` freezes system blocks per (session, provider/model/endpoint) with batched append-only reveals; frozen blocks rendered byte-identically to upstream at request prep; `small` turns bypass; `OPENCODE_DISABLE_LAZY_TOOLS` kill-switch restores upstream per-turn behavior (R12-008 partial, R00-013 axis flag).

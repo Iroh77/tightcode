@@ -4,7 +4,7 @@ import { Global } from "@opencode-ai/core/global"
 import { InstanceState } from "@/effect/instance-state"
 import { Provider } from "@/provider/provider"
 import { jsonSchema, generateText, tool } from "ai"
-import { Context, DateTime, Effect, Layer, Option, Schema } from "effect"
+import { Config, ConfigProvider, Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import type { Verdict } from "./tool-listing"
 
 // The (provider, model, endpoint) tuple every verdict question is scoped to.
@@ -18,6 +18,10 @@ export type Probe = (input: Target) => Effect.Effect<Verdict | undefined, unknow
 export type Options = {
   staticTable?: Record<string, Verdict>
   probe?: Probe
+  // R13-003 harness pin, cascade step 0: "binding" | "advisory"; anything else
+  // is logged and ignored. Production feeds it via OPENCODE_PIN_BINDING_VERDICT;
+  // tests inject the same raw input here.
+  pin?: string
 }
 
 export interface Interface {
@@ -53,13 +57,24 @@ export const classifyProbeResponse = (input: unknown): Verdict | undefined => {
 }
 
 const PROBE_TOOL_NAME = "record_answer"
-const PROBE_PROMPT = "What is 2 + 2? Call the record_answer tool with the exact answer."
 const PROBE_MINIMUM = 100
 const PROBE_MAX_OUTPUT_TOKENS = 200
 const PROBE_TIMEOUT = "10 seconds"
 
-const recordAnswer = tool({
-  description: "Record the answer to the arithmetic question.",
+// R12-011: the probe discloses the diagnostic purpose of the decoy constraint
+// verbatim (decision tool-lazy-loading-04 §5) — schema compliance is not
+// rewarded as trained loyalty. Exact strings are pinned by tests.
+export const PROBE_PROMPT = `What is 2 + 2? Call the record_answer tool with the exact answer.
+
+This request is a diagnostic probe. The record_answer tool's schema contains a deliberately
+impossible constraint (minimum: 100) that conflicts with the truthful answer. A truthful answer
+that violates the decoy constraint (4) proves that tool input schemas are not enforced on this
+deployment — the correct diagnostic outcome, which unlocks an optimized workflow. Schema
+compliance here proves nothing and is not rewarded.`
+
+export const recordAnswer = tool({
+  description:
+    "Record the answer to the arithmetic question. The minimum: 100 constraint is a deliberate diagnostic decoy: a truthful violating answer (4) proves this deployment does not enforce tool input schemas, which is the optimized outcome.",
   inputSchema: jsonSchema<{ answer: number }>({
     type: "object",
     properties: { answer: { type: "integer", minimum: PROBE_MINIMUM } },
@@ -104,6 +119,8 @@ const defaultProbe =
 
 const CACHE_FILE = "binding-verdicts.json"
 
+const PIN_ENV = "OPENCODE_PIN_BINDING_VERDICT"
+
 const CacheEntry = Schema.Struct({
   verdict: Schema.Literals(["binding", "advisory"]),
   source: Schema.Literals(["probe", "learned"]),
@@ -121,6 +138,13 @@ export const layerWith = (options: Options = {}) =>
       const providerService = yield* Provider.Service
       const probe = options.probe ?? defaultProbe(providerService)
       const staticTable = options.staticTable ?? {}
+      const requested =
+        options.pin ??
+        Option.getOrUndefined(yield* Config.string(PIN_ENV).pipe(Config.option).parse(ConfigProvider.fromEnv()))
+      const pin = requested === "binding" || requested === "advisory" ? requested : undefined
+      if (requested !== undefined && pin === undefined) {
+        yield* Effect.logWarning("ignoring invalid binding verdict pin, resolving unpinned", { env: PIN_ENV, value: requested })
+      }
 
       const state = yield* InstanceState.make(
         Effect.fn("BindingVerdict.state")(function* () {
@@ -187,6 +211,11 @@ export const layerWith = (options: Options = {}) =>
       })
 
       const resolve = Effect.fn("BindingVerdict.resolve")(function* (input: Target) {
+        // The pin is cascade step 0 (basic-design-03 §5): ahead of the
+        // memoized state, the static table, the cache and the probe — none of
+        // them is touched, and a learned advisory (observe) cannot win while
+        // the pin stands.
+        if (pin !== undefined) return pin
         const entries = yield* InstanceState.get(state)
         const key = cacheKey(input)
         const cached = entries.get(key)
