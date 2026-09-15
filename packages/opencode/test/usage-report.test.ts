@@ -7,6 +7,7 @@ import { tmpdir } from "./fixture/fixture"
 import {
   cacheCollapseFlags,
   CACHE_COLLAPSE_RATIO,
+  campaignReport,
   coldStartInput,
   deriveVerdicts,
   diff,
@@ -22,6 +23,7 @@ import {
   type UsageReport,
 } from "../script/measure-usage"
 import type { CaptureFile } from "../src/session/llm/prompt-capture"
+import type { CampaignSpec } from "../script/reference-workload"
 
 const manifest = (input?: Partial<RunManifest>): RunManifest => ({
   bin: "opencode",
@@ -546,5 +548,315 @@ describe("cache-immune metrics", () => {
       usageRow("ses_b", 0, { tokens: { input: 0, output: 2, reasoning: 0, cacheRead: 1, cacheWrite: 0 } }),
     ]
     expect(cacheCollapseFlags(rows)).toEqual([{ turn: 1, cacheRead: 1, expectedPrefix: 5 }])
+  })
+})
+
+// Campaign aggregation (R13-002 medians, R13-003 gate, R13-006 report core;
+// ticket 30): synthetic campaign dirs — campaign.json + per-run dirs written
+// by the writeRun helper above. Contracts: ARCHITECTURE/detailed/comparison-testing.md
+// §Data structures (ComparisonReport v1) + §Module contracts (campaign aggregation).
+
+describe("campaign aggregation (v2 report)", () => {
+  const forkManifest = (input?: Partial<RunManifest>): RunManifest =>
+    manifest({ verdicts: ["binding"], pin: "binding", binary: "fork-1", ...input })
+
+  const upstreamManifest = (input?: Partial<RunManifest>): RunManifest =>
+    manifest({ capture: false, capturesDir: null, verdicts: [], pin: null, binary: "upstream-1", ...input })
+
+  const spec = (phases: string[] = ["p1"], legs?: CampaignSpec["legs"]): CampaignSpec => ({
+    phases: phases.map((name) => ({ name, model: "test/model" })),
+    legs:
+      legs ?? [
+        { shape: "fork", bin: "fork-bin" },
+        { shape: "upstream", bin: "upstream-bin" },
+      ],
+    runs: 2,
+  })
+
+  const doc = (runs: unknown[], input?: { spec?: unknown; endedAt?: string | null }) => ({
+    spec: spec(),
+    seed: 7,
+    startedAt: "2026-09-15T00:00:00.000Z",
+    endedAt: "2026-09-15T00:10:00.000Z",
+    runs,
+    ...input,
+  })
+
+  const scheduleRun = (index: number, phase: string, shape: "fork" | "upstream", proxy = false) => ({
+    index,
+    phase,
+    shape,
+    proxy,
+    rep: index % 2,
+    runDir: `${String(index).padStart(2, "0")}-${phase}-${shape}${proxy ? "-proxy" : ""}`,
+    status: "done",
+  })
+
+  type RunEntry = {
+    dir: string
+    manifest: RunManifest
+    sessions: string[]
+    parts: { sessionID: string; data: Record<string, unknown> }[]
+    captures: { sessionID: string; seq: number; file: CaptureFile }[]
+  }
+
+  const writeCampaignDir = async (dir: string, document: object, runDirs: RunEntry[]) => {
+    await fs.mkdir(dir, { recursive: true })
+    await Bun.write(path.join(dir, "campaign.json"), JSON.stringify(document))
+    for (const entry of runDirs) await writeRun(path.join(dir, entry.dir), entry)
+  }
+
+  const dirOf = (index: number, shape: "fork" | "upstream", phase = "p1", proxy = false) =>
+    `${String(index).padStart(2, "0")}-${phase}-${shape}${proxy ? "-proxy" : ""}`
+
+  // Hand-computed fixture legs (62 chars per capture — the ticket-28 fixture):
+  // fork coldStart [10, 30] → median 20; sessionInput [16, 36] → median 26
+  // (input+cacheRead+cacheWrite = +5+1); payloadChars [62, 124] → median 93.
+  // upstream coldStart [12, 14] → median 13; sessionInput [18, 20] → median 19.
+  const forkRep = (index: number, input?: Partial<RunManifest>): RunEntry => ({
+    dir: dirOf(index, "fork"),
+    manifest: forkManifest(input),
+    sessions: ["ses_a"],
+    parts: [{ sessionID: "ses_a", data: stepFinish({ input: index % 2 === 0 ? 10 : 30 }) }],
+    captures: [
+      { sessionID: "ses_a", seq: 0, file: capture("ses_a") },
+      ...(index % 2 === 1 ? [{ sessionID: "ses_a", seq: 1, file: capture("ses_a", "msg_2") }] : []),
+    ],
+  })
+
+  const upstreamRep = (index: number, input?: Partial<RunManifest>): RunEntry => ({
+    dir: dirOf(index, "upstream"),
+    manifest: upstreamManifest(input),
+    sessions: ["ses_u"],
+    parts: [{ sessionID: "ses_u", data: stepFinish({ input: index % 2 === 0 ? 12 : 14 }) }],
+    captures: [],
+  })
+
+  const p1DocRuns = (): object[] => [
+    scheduleRun(0, "p1", "fork"),
+    scheduleRun(1, "p1", "fork"),
+    scheduleRun(2, "p1", "upstream"),
+    scheduleRun(3, "p1", "upstream"),
+  ]
+
+  const p1Doc = (input?: { spec?: unknown; endedAt?: string | null }): object =>
+    doc(p1DocRuns(), input)
+
+  test("happy path: per-leg dispersions match hand-computed medians; upstream legs payloadChars/verdict null, gate-exempt", async () => {
+    await using tmp = await tmpdir()
+    const entries = [
+      forkRep(0),
+      forkRep(1),
+      upstreamRep(2),
+      upstreamRep(3),
+      { ...forkRep(4), dir: dirOf(4, "fork", "p2") },
+      { ...forkRep(5), dir: dirOf(5, "fork", "p2") },
+      { ...upstreamRep(6), dir: dirOf(6, "upstream", "p2") },
+      { ...upstreamRep(7), dir: dirOf(7, "upstream", "p2") },
+    ]
+    await writeCampaignDir(tmp.path, doc([scheduleRun(0, "p1", "fork"), scheduleRun(1, "p1", "fork"), scheduleRun(2, "p1", "upstream"), scheduleRun(3, "p1", "upstream"), scheduleRun(4, "p2", "fork"), scheduleRun(5, "p2", "fork"), scheduleRun(6, "p2", "upstream"), scheduleRun(7, "p2", "upstream")], { spec: spec(["p1", "p2"]) }), entries)
+    const result = await campaignReport(tmp.path)
+    expect(result.schema).toBe(1)
+    expect(result.campaign.spec).toEqual(spec(["p1", "p2"]))
+    expect(result.campaign.seed).toBe(7)
+    expect(result.campaign.schedule).toHaveLength(8)
+    expect(result.campaign.endedAt).toBe("2026-09-15T00:10:00.000Z")
+    expect(result.phases.map((phase) => phase.name)).toEqual(["p1", "p2"])
+    expect(result.phases.map((phase) => phase.model)).toEqual(["test/model", "test/model"])
+    const p1 = result.phases[0]
+    const forkLeg = p1.legs[0]
+    expect(forkLeg.shape).toBe("fork")
+    expect(forkLeg.proxy).toBe(false)
+    expect(forkLeg.verdict).toBe("binding")
+    expect(forkLeg.verdictMixed).toBe(false)
+    expect(forkLeg.runs).toEqual([
+      { runDir: "00-p1-fork", verdicts: ["binding"], binary: "fork-1" },
+      { runDir: "01-p1-fork", verdicts: ["binding"], binary: "fork-1" },
+    ])
+    expect(forkLeg.metrics.coldStartInput).toEqual({ median: 20, min: 10, max: 30, values: [10, 30] })
+    expect(forkLeg.metrics.sessionInput).toEqual({ median: 26, min: 16, max: 36, values: [16, 36] })
+    expect(forkLeg.metrics.payloadChars).toEqual({ median: 93, min: 62, max: 124, values: [62, 124] })
+    expect(forkLeg.coldStartAttribution).toBeNull()
+    expect(forkLeg.diagnostics.cacheCollapses).toEqual([])
+    const upstreamLeg = p1.legs[1]
+    expect(upstreamLeg.shape).toBe("upstream")
+    expect(upstreamLeg.verdict).toBeNull()
+    expect(upstreamLeg.verdictMixed).toBe(false)
+    expect(upstreamLeg.metrics.coldStartInput).toEqual({ median: 13, min: 12, max: 14, values: [12, 14] })
+    expect(upstreamLeg.metrics.sessionInput).toEqual({ median: 19, min: 18, max: 20, values: [18, 20] })
+    expect(upstreamLeg.metrics.payloadChars).toBeNull()
+    expect(p1.comparisons).toEqual([
+      {
+        kind: "fork-vs-upstream",
+        comparable: true,
+        verdict: "binding",
+        metrics: {
+          coldStartInput: { fork: 20, other: 13, delta: 7 },
+          sessionInput: { fork: 26, other: 19, delta: 7 },
+          payloadChars: null,
+        },
+      },
+    ])
+    expect(result.phases[1].comparisons).toEqual(p1.comparisons)
+    expect(result.warnings).toEqual([])
+  })
+
+  test("verdict gate: fork runs split binding/advisory → comparable false + warning naming both run dirs, medians still emitted", async () => {
+    await using tmp = await tmpdir()
+    const entries = [forkRep(0, { verdicts: ["binding"] }), forkRep(1, { verdicts: ["advisory"] }), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const result = await campaignReport(tmp.path)
+    const forkLeg = result.phases[0].legs[0]
+    expect(forkLeg.verdict).toBeNull()
+    expect(forkLeg.verdictMixed).toBe(true)
+    expect(forkLeg.metrics.sessionInput).toEqual({ median: 26, min: 16, max: 36, values: [16, 36] })
+    const comparison = result.phases[0].comparisons[0]
+    expect(comparison.comparable).toBe(false)
+    expect(comparison.verdict).toBeNull()
+    expect(comparison.metrics.sessionInput).toEqual({ fork: 26, other: 19, delta: 7 })
+    expect(result.warnings).toHaveLength(1)
+    expect(result.warnings[0]).toMatch(/flip/)
+    expect(result.warnings[0]).toMatch(/binding in 00-p1-fork/)
+    expect(result.warnings[0]).toMatch(/advisory in 01-p1-fork/)
+  })
+
+  test("verdict gate: a run with ≥2 verdicts → verdictMixed true + comparable false + warning naming the run dir", async () => {
+    await using tmp = await tmpdir()
+    const entries = [forkRep(0, { verdicts: ["advisory", "binding"] }), forkRep(1), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const result = await campaignReport(tmp.path)
+    const forkLeg = result.phases[0].legs[0]
+    expect(forkLeg.verdict).toBeNull()
+    expect(forkLeg.verdictMixed).toBe(true)
+    expect(result.phases[0].comparisons[0].comparable).toBe(false)
+    expect(result.warnings).toHaveLength(1)
+    expect(result.warnings[0]).toMatch(/mixed/)
+    expect(result.warnings[0]).toMatch(/00-p1-fork/)
+  })
+
+  test("old fork run dirs (manifests without verdicts) → fork leg incomparable + warning; metrics still computed", async () => {
+    await using tmp = await tmpdir()
+    const old = { pin: undefined, verdicts: undefined, binary: undefined }
+    const entries = [forkRep(0, old), forkRep(1, old), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const result = await campaignReport(tmp.path)
+    const forkLeg = result.phases[0].legs[0]
+    expect(forkLeg.verdict).toBeNull()
+    expect(forkLeg.verdictMixed).toBe(false)
+    expect(forkLeg.metrics.sessionInput).toEqual({ median: 26, min: 16, max: 36, values: [16, 36] })
+    expect(result.phases[0].comparisons[0].comparable).toBe(false)
+    expect(result.warnings).toHaveLength(1)
+    expect(result.warnings[0]).toMatch(/00-p1-fork/)
+    expect(result.warnings[0]).toMatch(/no recorded verdict/)
+  })
+
+  test("fork-vs-fork-proxy pair: payloadChars delta present; both sides capture-bearing; proxy leg gate-exempt", async () => {
+    await using tmp = await tmpdir()
+    const proxyRep = (index: number): RunEntry => ({
+      dir: dirOf(index, "fork", "p1", true),
+      manifest: forkManifest({ verdicts: [] }),
+      sessions: ["ses_a"],
+      parts: [{ sessionID: "ses_a", data: stepFinish({ input: index % 2 === 0 ? 11 : 31 }) }],
+      captures: [{ sessionID: "ses_a", seq: 0, file: capture("ses_a") }],
+    })
+    const entries = [forkRep(0), forkRep(1), proxyRep(2), proxyRep(3), upstreamRep(4), upstreamRep(5)]
+    await writeCampaignDir(
+      tmp.path,
+      doc([
+        scheduleRun(0, "p1", "fork"),
+        scheduleRun(1, "p1", "fork"),
+        scheduleRun(2, "p1", "fork", true),
+        scheduleRun(3, "p1", "fork", true),
+        scheduleRun(4, "p1", "upstream"),
+        scheduleRun(5, "p1", "upstream"),
+      ]),
+      entries,
+    )
+    const result = await campaignReport(tmp.path)
+    const legs = result.phases[0].legs
+    expect(legs.map((leg) => [leg.shape, leg.proxy])).toEqual([
+      ["fork", false],
+      ["fork", true],
+      ["upstream", false],
+    ])
+    const proxyLeg = legs[1]
+    expect(proxyLeg.verdict).toBeNull()
+    expect(proxyLeg.metrics.payloadChars).toEqual({ median: 62, min: 62, max: 62, values: [62, 62] })
+    const [upstreamPair, proxyPair] = result.phases[0].comparisons
+    expect(upstreamPair.kind).toBe("fork-vs-upstream")
+    expect(proxyPair).toEqual({
+      kind: "fork-vs-fork-proxy",
+      comparable: true,
+      verdict: "binding",
+      metrics: {
+        coldStartInput: { fork: 20, other: 21, delta: -1 },
+        sessionInput: { fork: 26, other: 27, delta: -1 },
+        payloadChars: { fork: 93, other: 62, delta: 31 },
+      },
+    })
+    expect(result.warnings).toEqual([])
+  })
+
+  test("cache-collapse diagnostics: crossing rows listed with runDir + turn + expectedPrefix; absent otherwise", async () => {
+    await using tmp = await tmpdir()
+    const collapsing: RunEntry = {
+      ...forkRep(0),
+      parts: [
+        { sessionID: "ses_a", data: { type: "step-finish", tokens: { input: 100, output: 2, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.5 } },
+        { sessionID: "ses_a", data: { type: "step-finish", tokens: { input: 20, output: 2, reasoning: 0, cache: { read: 10, write: 0 } }, cost: 0.5 } },
+      ],
+    }
+    const entries = [collapsing, forkRep(1), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const result = await campaignReport(tmp.path)
+    expect(result.phases[0].legs[0].diagnostics.cacheCollapses).toEqual([{ runDir: "00-p1-fork", turn: 1, cacheRead: 10, expectedPrefix: 50 }])
+    expect(result.phases[0].legs[1].diagnostics.cacheCollapses).toEqual([])
+  })
+
+  test("incomplete campaign (failed/pending run, or null endedAt) refused loudly; missing campaign.json refused loudly", async () => {
+    await using tmp = await tmpdir()
+    const entries = [forkRep(0), forkRep(1), upstreamRep(2), upstreamRep(3)]
+    const runs = [scheduleRun(0, "p1", "fork"), scheduleRun(1, "p1", "fork"), scheduleRun(2, "p1", "upstream"), scheduleRun(3, "p1", "upstream")]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    await Bun.write(path.join(tmp.path, "campaign.json"), JSON.stringify(doc([{ ...runs[3], status: "failed", error: "boom" }])))
+    await expect(campaignReport(tmp.path)).rejects.toThrow(/incomplete.*03-p1-upstream.*failed/)
+    await Bun.write(path.join(tmp.path, "campaign.json"), JSON.stringify(doc([{ ...runs[3], status: "pending" }])))
+    await expect(campaignReport(tmp.path)).rejects.toThrow(/incomplete/)
+    await Bun.write(path.join(tmp.path, "campaign.json"), JSON.stringify(doc(runs, { endedAt: null })))
+    await expect(campaignReport(tmp.path)).rejects.toThrow(/incomplete/)
+    await using tmp2 = await tmpdir()
+    await expect(campaignReport(tmp2.path)).rejects.toThrow(/campaign\.json/)
+  })
+
+  test("CLI: campaign <dir> prints the report JSON; -o writes it instead", async () => {
+    await using tmp = await tmpdir()
+    const entries = [forkRep(0), forkRep(1), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const script = path.join(import.meta.dir, "../script/measure-usage.ts")
+    const stdoutProc = Bun.spawn([process.execPath, script, "campaign", tmp.path], { cwd: path.join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" })
+    const [stdout, code] = await Promise.all([new Response(stdoutProc.stdout).text(), stdoutProc.exited])
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdout)
+    expect(parsed.schema).toBe(1)
+    expect(parsed.phases[0].comparisons[0].comparable).toBe(true)
+    expect(parsed.phases[0].comparisons[0].metrics.coldStartInput.delta).toBe(7)
+    const outPath = path.join(tmp.path, "report.json")
+    const fileProc = Bun.spawn([process.execPath, script, "campaign", tmp.path, "-o", outPath], { cwd: path.join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" })
+    const [stdout2, code2] = await Promise.all([new Response(fileProc.stdout).text(), fileProc.exited])
+    expect(code2).toBe(0)
+    expect(stdout2).toBe("")
+    expect(JSON.parse(await Bun.file(outPath).text()).schema).toBe(1)
+  })
+
+  test("CLI: incomplete campaign exits non-zero with the reason on stderr", async () => {
+    await using tmp = await tmpdir()
+    const entries = [forkRep(0), forkRep(1), upstreamRep(2)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    await Bun.write(path.join(tmp.path, "campaign.json"), JSON.stringify(doc([...p1DocRuns(), { ...scheduleRun(3, "p1", "upstream"), status: "pending" }])))
+    const script = path.join(import.meta.dir, "../script/measure-usage.ts")
+    const proc = Bun.spawn([process.execPath, script, "campaign", tmp.path], { cwd: path.join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" })
+    const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited])
+    expect(code).toBe(1)
+    expect(stderr).toMatch(/incomplete/)
   })
 })

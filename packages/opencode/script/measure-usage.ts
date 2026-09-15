@@ -5,6 +5,7 @@ import { Schema } from "effect"
 import fs from "fs/promises"
 import path from "path"
 import type { CaptureFile } from "../src/session/llm/prompt-capture"
+import type { CampaignSchedule, CampaignSpec } from "./reference-workload"
 
 // Measurement script (R10-003/R10-004): offline transforms over a reference-workload
 // run dir — provider-reported usage from the run's SQLite step-finish parts
@@ -421,13 +422,313 @@ export const loadRun = async (runDir: string): Promise<Run> => {
 
 const usageText = () =>
   console.error(
-    "usage: bun run script/measure-usage.ts report <runDir> [-o out.json]\n       bun run script/measure-usage.ts diff <forkRunDir> <upstreamRunDir> [-o out.json]",
+    "usage: bun run script/measure-usage.ts report <runDir> [-o out.json]\n       bun run script/measure-usage.ts diff <forkRunDir> <upstreamRunDir> [-o out.json]\n       bun run script/measure-usage.ts campaign <campaignDir> [-o out.json]",
   )
 
 const emit = async (value: unknown, out: string | undefined) => {
   const json = JSON.stringify(value, null, 2) + "\n"
   if (out) await Bun.write(out, json)
   else process.stdout.write(json)
+}
+
+// --- campaign aggregation (R13-002/003/006, ticket 30) ---
+// ComparisonReport v1 — same versioning discipline as Breakdown JSON (R10-006):
+// a schema field from birth, stable key vocabulary, tolerant additive
+// evolution. Contracts: ARCHITECTURE/detailed/comparison-testing.md.
+
+// Type-only: the runner imports this module at runtime, so the dependency
+// must not circle back (CampaignSpec/CampaignSchedule are erased here).
+export type Dispersion = { median: number; min: number; max: number; values: number[] }
+
+export type LegReport = {
+  shape: "fork" | "upstream"
+  proxy: boolean
+  runs: Array<{ runDir: string; verdicts: string[]; binary: string | null }>
+  verdict: "binding" | "advisory" | null // the leg's uniform recorded verdict; null = none recorded
+  verdictMixed: boolean // runs disagree, or any run carried ≥2 verdicts
+  metrics: {
+    coldStartInput: Dispersion | null
+    sessionInput: Dispersion | null
+    payloadChars: Dispersion | null
+  }
+  coldStartAttribution: { system: Dispersion; tools: Dispersion; history: Dispersion } | null // ticket 31 (SC-5)
+  diagnostics: { cacheCollapses: Array<{ runDir: string; turn: number; cacheRead: number; expectedPrefix: number }> }
+}
+
+export type ComparisonPair = {
+  kind: "fork-vs-upstream" | "fork-vs-fork-proxy"
+  comparable: boolean // fork side uniform AND recorded (decision comparison-testing-01 §3)
+  verdict: "binding" | "advisory" | null // the fork side's verdict column (R13-003/006)
+  metrics: {
+    coldStartInput: { fork: number; other: number; delta: number } | null
+    sessionInput: { fork: number; other: number; delta: number } | null
+    payloadChars: { fork: number; other: number; delta: number } | null // fork-vs-fork-proxy only
+  }
+}
+
+export type ComparisonReport = {
+  schema: 1
+  campaign: {
+    outDir: string
+    spec: CampaignSpec
+    seed: number
+    schedule: CampaignSchedule["runs"]
+    startedAt: string
+    endedAt: string
+  }
+  phases: Array<{ name: string; model: string; legs: LegReport[]; comparisons: ComparisonPair[] }>
+  warnings: string[]
+}
+
+// Tolerant-additive reader for the campaign.json the runner writes (ticket 29):
+// the fields the aggregation consumes are validated, the spec echo is carried
+// through as parsed.
+const CampaignDocSchema = Schema.Struct({
+  spec: Schema.Struct({
+    phases: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        model: Schema.String,
+        mcp: Schema.optional(Schema.Unknown),
+      }),
+    ),
+    legs: Schema.Array(
+      Schema.Struct({
+        shape: Schema.Literals(["fork", "upstream"]),
+        bin: Schema.String,
+        proxy: Schema.optional(Schema.Boolean),
+      }),
+    ),
+    runs: Schema.Number,
+    seed: Schema.optional(Schema.Number),
+    pin: Schema.optional(Schema.Literals(["binding", "advisory"])),
+  }),
+  seed: Schema.Number,
+  startedAt: Schema.String,
+  endedAt: Schema.NullOr(Schema.String),
+  runs: Schema.Array(
+    Schema.Struct({
+      index: Schema.Number,
+      phase: Schema.String,
+      shape: Schema.Literals(["fork", "upstream"]),
+      proxy: Schema.Boolean,
+      rep: Schema.Number,
+      runDir: Schema.String,
+      status: Schema.Literals(["done", "failed", "pending"]),
+      error: Schema.optional(Schema.String),
+    }),
+  ),
+})
+
+type CampaignDoc = Schema.Schema.Type<typeof CampaignDocSchema>
+
+const readCampaign = async (campaignDir: string): Promise<CampaignDoc> => {
+  const doc: unknown = await Bun.file(path.join(campaignDir, "campaign.json"))
+    .json()
+    .catch((error: unknown) => {
+      const cause = error instanceof Error ? error.message : String(error)
+      throw new Error(`measure-usage: campaign.json unreadable in ${campaignDir}: ${cause}`)
+    })
+  if (!Schema.is(CampaignDocSchema)(doc))
+    throw new Error(`measure-usage: campaign.json in ${campaignDir} is not a valid campaign document`)
+  return doc
+}
+
+// Median with dispersion over the leg's run values. Even counts average the
+// two middle values; `values` keeps the raw run-order list so the median is
+// never the only witness.
+const dispersion = (values: number[]): Dispersion => {
+  const sorted = values.toSorted((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  const median = sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+  return { median, min: sorted[0], max: sorted[sorted.length - 1], values }
+}
+
+// One metric column over a leg's runs: null when no run provides it;
+// partial availability is a warning naming the runs (surfaced, never
+// silently folded — R00-010).
+const legMetric = (
+  runDirs: string[],
+  values: Array<number | null>,
+  warnings: string[],
+  label: string,
+): Dispersion | null => {
+  const available = values.filter((value) => value !== null) as number[]
+  if (available.length === 0) return null
+  if (available.length < values.length) {
+    const missing = runDirs.filter((_, i) => values[i] === null)
+    warnings.push(`measure-usage: ${label} unavailable in ${missing.join(", ")} — dispersion over the remaining runs`)
+  }
+  return dispersion(available)
+}
+
+const legReport = (
+  shape: "fork" | "upstream",
+  proxy: boolean,
+  loaded: Array<{ runDir: string; verdicts: string[]; binary: string | null; run: Run }>,
+  warnings: string[],
+): LegReport => {
+  const runDirs = loaded.map((entry) => entry.runDir)
+  const metrics = {
+    coldStartInput: legMetric(runDirs, loaded.map((entry) => coldStartInput(entry.run)), warnings, `coldStartInput in leg ${shape}${proxy ? "-proxy" : ""} unavailable for run dirs`),
+    sessionInput: legMetric(runDirs, loaded.map((entry) => sessionInput(entry.run)), warnings, `sessionInput in leg ${shape}${proxy ? "-proxy" : ""} unavailable for run dirs`),
+    payloadChars: legMetric(runDirs, loaded.map((entry) => payloadChars(entry.run)), warnings, `payloadChars in leg ${shape}${proxy ? "-proxy" : ""} unavailable for run dirs`),
+  }
+  const runs = loaded.map((entry) => ({ runDir: entry.runDir, verdicts: entry.verdicts, binary: entry.binary }))
+  // R13-003 (comparison-testing-01 §3): the leg's verdict column is its
+  // uniform recorded verdict — every run exactly one identical verdict;
+  // mixed (≥2 within a run) and flips (disagreement across runs) surface as
+  // verdictMixed, unrecordable ([]) as null without mixed.
+  const single = runs.filter((entry) => entry.verdicts.length === 1)
+  const unrecorded = runs.filter((entry) => entry.verdicts.length === 0)
+  const mixed = runs.filter((entry) => entry.verdicts.length >= 2)
+  const distinct = [...new Set(single.map((entry) => entry.verdicts[0] as "binding" | "advisory"))]
+  const verdict = distinct.length === 1 && mixed.length === 0 && unrecorded.length === 0 ? distinct[0] : null
+  const diagnostics = loaded.flatMap((entry) =>
+    cacheCollapseFlags(entry.run.usage).map((flag) => ({ runDir: entry.runDir, ...flag })),
+  )
+  return {
+    shape,
+    proxy,
+    runs,
+    verdict,
+    verdictMixed: distinct.length > 1 || mixed.length > 0,
+    metrics,
+    coldStartAttribution: null,
+    diagnostics: { cacheCollapses: diagnostics },
+  }
+}
+
+// Fork-side verdict gate (R13-003): comparable only when uniform AND
+// recorded; upstream/proxy sides are exempt (no lazy branch in their
+// payloads). Every failure mode gets a warning naming the run dirs —
+// surfaced, never silently folded into a delta.
+const forkGate = (forkLeg: LegReport): { comparable: boolean; warnings: string[] } => {
+  const warnings: string[] = []
+  const mixed = forkLeg.runs.filter((entry) => entry.verdicts.length >= 2)
+  const unrecorded = forkLeg.runs.filter((entry) => entry.verdicts.length === 0)
+  if (mixed.length > 0)
+    warnings.push(
+      `measure-usage: fork verdicts mixed in ${mixed.map((entry) => entry.runDir).join(", ")} (${mixed
+        .flatMap((entry) => entry.verdicts)
+        .join(", ")}) — comparison refused (R13-003)`,
+    )
+  if (unrecorded.length > 0)
+    warnings.push(
+      `measure-usage: no recorded verdict in ${unrecorded.map((entry) => entry.runDir).join(", ")} — mechanism identity unverifiable, comparison refused (R13-003)`,
+    )
+  const uniform = forkLeg.runs.filter((entry) => entry.verdicts.length === 1)
+  const byVerdict = new Map<string, string[]>()
+  for (const entry of uniform) {
+    const dirs = byVerdict.get(entry.verdicts[0]) ?? []
+    dirs.push(entry.runDir)
+    byVerdict.set(entry.verdicts[0], dirs)
+  }
+  if (byVerdict.size > 1)
+    warnings.push(
+      `measure-usage: fork verdict flip across runs — ${[...byVerdict]
+        .map(([verdict, dirs]) => `${verdict} in ${dirs.join(", ")}`)
+        .join(" vs ")} — comparison refused (R13-003)`,
+    )
+  return { comparable: warnings.length === 0, warnings }
+}
+
+const pairMetrics = (
+  forkLeg: LegReport,
+  otherLeg: LegReport,
+  includePayload: boolean,
+): ComparisonPair["metrics"] => {
+  const delta = (fork: Dispersion | null, other: Dispersion | null) =>
+    fork && other ? { fork: fork.median, other: other.median, delta: fork.median - other.median } : null
+  return {
+    coldStartInput: delta(forkLeg.metrics.coldStartInput, otherLeg.metrics.coldStartInput),
+    sessionInput: delta(forkLeg.metrics.sessionInput, otherLeg.metrics.sessionInput),
+    payloadChars: includePayload ? delta(forkLeg.metrics.payloadChars, otherLeg.metrics.payloadChars) : null,
+  }
+}
+
+export const campaignReport = async (campaignDir: string): Promise<ComparisonReport> => {
+  const campaign = await readCampaign(campaignDir)
+  // Incomplete campaign = operator error (R00-010): refuse loudly, never
+  // aggregate a poisoned schedule.
+  const notDone = campaign.runs.filter((run) => run.status !== "done")
+  if (notDone.length > 0 || campaign.endedAt === null) {
+    const detail =
+      notDone.length > 0
+        ? `${notDone.length} run(s) not done (${notDone.map((run) => `${run.runDir}: ${run.status}${run.error ? ` ${run.error}` : ""}`).join(", ")})`
+        : "endedAt is missing"
+    throw new Error(`measure-usage: campaign ${campaignDir} is incomplete — ${detail}`)
+  }
+  const phaseNames = campaign.spec.phases.map((phase) => phase.name)
+  for (const run of campaign.runs) {
+    if (!phaseNames.includes(run.phase))
+      throw new Error(`measure-usage: campaign schedule run ${run.runDir} references unknown phase ${JSON.stringify(run.phase)}`)
+  }
+  const warnings: string[] = []
+  const loaded = await Promise.all(
+    campaign.runs.map(async (schedule) => {
+      const run = await loadRun(path.resolve(campaignDir, schedule.runDir))
+      return {
+        schedule,
+        runDir: schedule.runDir,
+        run,
+        verdicts: [...(run.manifest.verdicts ?? [])],
+        binary: run.manifest.binary ?? null,
+      }
+    }),
+  )
+  const phases = campaign.spec.phases.map((phase) => {
+    // Legs grouped by (shape, proxy) in schedule first-appearance order.
+    const phaseRuns = loaded.filter((entry) => entry.schedule.phase === phase.name)
+    const legOrder: Array<{ shape: "fork" | "upstream"; proxy: boolean }> = []
+    const byLeg = new Map<string, typeof phaseRuns>()
+    for (const entry of phaseRuns) {
+      const key = `${entry.schedule.shape}:${entry.schedule.proxy}`
+      const group = byLeg.get(key)
+      if (group) group.push(entry)
+      else {
+        byLeg.set(key, [entry])
+        legOrder.push({ shape: entry.schedule.shape, proxy: entry.schedule.proxy })
+      }
+    }
+    const legs = legOrder.map((leg) => legReport(leg.shape, leg.proxy, byLeg.get(`${leg.shape}:${leg.proxy}`) ?? [], warnings))
+    const forkLeg = legs.find((leg) => leg.shape === "fork" && !leg.proxy)
+    const gate = forkLeg ? forkGate(forkLeg) : null
+    if (gate) warnings.push(...gate.warnings)
+    const comparisons: ComparisonPair[] = []
+    const otherLeg = legs.find((leg) => leg.shape === "upstream" && !leg.proxy)
+    if (forkLeg && otherLeg && gate)
+      comparisons.push({
+        kind: "fork-vs-upstream",
+        comparable: gate.comparable,
+        verdict: forkLeg.verdict,
+        metrics: pairMetrics(forkLeg, otherLeg, false),
+      })
+    const proxyLeg = legs.find((leg) => leg.shape === "fork" && leg.proxy)
+    if (forkLeg && proxyLeg && gate)
+      comparisons.push({
+        kind: "fork-vs-fork-proxy",
+        comparable: gate.comparable,
+        verdict: forkLeg.verdict,
+        metrics: pairMetrics(forkLeg, proxyLeg, true),
+      })
+    return { name: phase.name, model: phase.model, legs, comparisons }
+  })
+  return {
+    schema: 1,
+    campaign: {
+      outDir: campaignDir,
+      // Effect Schema's Type is readonly; the report contract is the mutable
+      // CampaignSpec — spread into fresh arrays at the echo boundary.
+      spec: { ...campaign.spec, phases: [...campaign.spec.phases], legs: [...campaign.spec.legs] },
+      seed: campaign.seed,
+      schedule: [...campaign.runs],
+      startedAt: campaign.startedAt,
+      endedAt: campaign.endedAt,
+    },
+    phases,
+    warnings,
+  }
 }
 
 const main = async (argv: string[]): Promise<number> => {
@@ -456,6 +757,10 @@ const main = async (argv: string[]): Promise<number> => {
     const fork = report(await loadRun(positional[0]))
     const upstream = report(await loadRun(positional[1]))
     await emit(diff(fork, upstream), out)
+    return 0
+  }
+  if (cmd === "campaign" && positional.length === 1) {
+    await emit(await campaignReport(positional[0]), out)
     return 0
   }
   usageText()
