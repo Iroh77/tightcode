@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import type { JSONSchema7 } from "@ai-sdk/provider"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -831,6 +832,65 @@ describe("session.llm-request-prep.capture-tool-servers (R10-006, ticket 23)", (
       const small = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_small"))
       expect("toolServers" in bypass.meta).toBe(false)
       expect("toolServers" in small.meta).toBe(false)
+    }),
+  )
+})
+
+describe("session.llm-request-prep.capture-verdict-binary (R13-003/005, ticket 27)", () => {
+  const readCaptureMeta = async (data: string, sessionID: string) => {
+    const file = await Bun.file(path.join(data, "prompt-captures", sessionID, "0000.json")).json()
+    return file as { meta: Record<string, unknown> }
+  }
+
+  const captureData = Effect.acquireRelease(
+    Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-prep-capture-"))),
+    (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
+  )
+
+  it.instance("lazy dump records meta.verdict from the stream input and meta.binary", () =>
+    Effect.gen(function* () {
+      const data = yield* captureData
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      yield* prepareWith({
+        promptBase,
+        flags: { ...base, enablePromptCapture: true },
+        sessionID: "ses_capture_verdict",
+        data,
+        tools: { glob: aiTool({ description: "find files", inputSchema: jsonSchema({ type: "object", properties: {} }) }) },
+        toolSeeds: [{ name: "glob", kind: "deferred", fullDescription: "glob description", jsonSchema: { type: "object", properties: {} }, source: "builtin" }],
+        toolVerdict: "advisory",
+      })
+      const file = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_verdict"))
+      expect(file.meta.verdict).toBe("advisory")
+      expect(file.meta.binary).toBe(InstallationVersion)
+    }),
+  )
+
+  it.instance("bypass and small dumps omit verdict (no lazy branch); binary always present", () =>
+    Effect.gen(function* () {
+      const data = yield* captureData
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      yield* prepareWith({
+        promptBase,
+        flags: { ...base, enablePromptCapture: true, disableLazyTools: true },
+        sessionID: "ses_capture_bypass_verdict",
+        data,
+      })
+      yield* prepareWith({
+        promptBase,
+        flags: { ...base, enablePromptCapture: true },
+        sessionID: "ses_capture_small_verdict",
+        data,
+        small: true,
+      })
+      const bypass = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_bypass_verdict"))
+      const small = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_small_verdict"))
+      expect("verdict" in bypass.meta).toBe(false)
+      expect("verdict" in small.meta).toBe(false)
+      expect(bypass.meta.binary).toBe(InstallationVersion)
+      expect(small.meta.binary).toBe(InstallationVersion)
     }),
   )
 })

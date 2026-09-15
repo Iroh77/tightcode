@@ -70,6 +70,10 @@ if (process.env.OPENCODE_ENABLE_PROMPT_CAPTURE === "1") {
     .filter((match) => match !== undefined)
     .reduce((max, match) => Math.max(max, Number(match)), -1) + 1
   const [providerID = "stub", ...modelRest] = (model ?? "stub/stub").split("/")
+  // Harness v2 mirror (R13-003/005): the pin env is the offline stand-in for
+  // the fork's resolved verdict — mapped verbatim, absent on anything else;
+  // binary is always the stub identity.
+  const pinVerdict = process.env.OPENCODE_PIN_BINDING_VERDICT
   const capture: CaptureFile = {
     meta: {
       version: 1,
@@ -85,6 +89,8 @@ if (process.env.OPENCODE_ENABLE_PROMPT_CAPTURE === "1") {
         lazyTools: process.env.OPENCODE_DISABLE_LAZY_TOOLS !== "1",
         staticSlimming: process.env.OPENCODE_DISABLE_STATIC_SLIMMING !== "1",
       },
+      ...(pinVerdict === "binding" || pinVerdict === "advisory" ? { verdict: pinVerdict } : {}),
+      binary: "stub",
     },
     payload: {
       system: ["You are a stub assistant for reference-workload mechanics verification."],
@@ -102,6 +108,7 @@ await Bun.write(
       OPENCODE_ENABLE_PROMPT_CAPTURE: process.env.OPENCODE_ENABLE_PROMPT_CAPTURE,
       OPENCODE_DISABLE_LAZY_TOOLS: process.env.OPENCODE_DISABLE_LAZY_TOOLS,
       OPENCODE_DISABLE_STATIC_SLIMMING: process.env.OPENCODE_DISABLE_STATIC_SLIMMING,
+      OPENCODE_PIN_BINDING_VERDICT: process.env.OPENCODE_PIN_BINDING_VERDICT,
     },
     null,
     2,

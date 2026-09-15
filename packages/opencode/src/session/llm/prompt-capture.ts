@@ -24,6 +24,13 @@ export type CaptureMeta = {
   // sanitized MCP server, assembled from the frozen listing entries. Absent on
   // bypass/small turns (no frozen base) — additive optional, tolerant readers.
   readonly toolServers?: Record<string, string>
+  // Mechanism + binary self-identification for the comparison harness
+  // (R13-003/005, SC-4): the resolved schema-binding verdict that shaped the
+  // payload (absent when no lazy branch ran — bypass/small/proxy/kill-switch
+  // turns) and the producing binary's version constant. Additive optional —
+  // old captures parse and report.
+  readonly verdict?: "binding" | "advisory"
+  readonly binary?: string
 }
 
 export type ToolCapture = {

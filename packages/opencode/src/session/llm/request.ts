@@ -319,6 +319,11 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
               ),
             }
           : {}),
+        // Harness v2 self-identification (R13-003/005): absent, not null —
+        // verdict only when the lazy branch ran (kill-switch turns leave the
+        // stream input undefined); binary is a plain identifier (R10-002-safe).
+        ...(input.toolVerdict ? { verdict: input.toolVerdict } : {}),
+        binary: InstallationVersion,
       },
     })
   return prepared

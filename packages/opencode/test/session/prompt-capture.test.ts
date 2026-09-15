@@ -149,6 +149,22 @@ describe("session.prompt-capture.dump", () => {
     expect(JSON.stringify(withMap.payload.tools)).toBe(JSON.stringify(without.payload.tools))
   })
 
+  test("meta.verdict and meta.binary ride the file; undefined fields stay absent (SC-4, R13-003/005)", async () => {
+    await using tmp = await tmpdir()
+    await dumpTo(tmp.path, { prepared: prepared(), meta: { ...meta, verdict: "binding", binary: "opencode/1.2.3" } })
+    await dumpTo(tmp.path, { prepared: prepared(), meta })
+    const withFields = await readFile(path.join(tmp.path, "prompt-captures", meta.sessionID, "0000.json")) as {
+      meta: Record<string, unknown>
+    }
+    const without = await readFile(path.join(tmp.path, "prompt-captures", meta.sessionID, "0001.json")) as {
+      meta: Record<string, unknown>
+    }
+    expect(withFields.meta.verdict).toBe("binding")
+    expect(withFields.meta.binary).toBe("opencode/1.2.3")
+    expect("verdict" in without.meta).toBe(false)
+    expect("binary" in without.meta).toBe(false)
+  })
+
   test("a non-jsonSchema tool skips the turn's dump entirely (contract violation)", async () => {
     await using tmp = await tmpdir()
     const violating = {

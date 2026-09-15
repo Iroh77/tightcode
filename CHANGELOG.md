@@ -8,6 +8,10 @@ Releases are tagged `vX.Y.Z` (git tag); sections are dated: `## [x.y.z] - YYYY-M
 
 Scaffold — fork of `anomalyco/opencode@bbd72fb8b` (dev) as TightCode.
 
+### Added (comparison testing — R13)
+
+- `feat(harness)`: capture meta self-identification (ticket 27) — capture dumps gain two additive optional meta fields assembled at the gated dump call site: `verdict` (`binding` | `advisory`, from `StreamInput.toolVerdict`, omitted when no lazy branch ran — bypass/small/proxy/kill-switch turns) and `binary` (`InstallationVersion`, always); envelope, whitelist, seq layout and `version: 1` untouched — old captures parse and report (R13-003 recording half, R13-005 capture side, SC-4). The reference-workload stub mirrors both (`meta.binary = "stub"`, `meta.verdict` mapped verbatim from `OPENCODE_PIN_BINDING_VERDICT`, absent otherwise) and records the pin env in `stub-env.json` so the offline campaign path exercises verdict columns.
+
 ### Added (tool lazy loading — R12, round 2)
 
 - `feat(core-lazy)`: wrapper listing policy — payload core (ticket 17) — the listing becomes a pure function of the frozen `(verdict, wrapper)` pair: on binding sessions with the wrapper enabled deferred entries produce no listing entry at all and impose drops them from the payload (second loop passes through only non-frozen names; StructuredOutput/`_noop` still pass); `SessionTools.resolve` computes `wrapperActive = binding && !disableToolWrapper`, pushes the `deferred_tool` eager seed before shape (definition facts in new `tool/deferred_tool.ts`/`.txt` — closed `{name, args}` schema + description; dispatch executor is ticket 19's) and returns `wrapper` beside the verdict (`StreamInput.toolWrapper`); the prompt base freezes the wrapper flag at first write next to the mode; `load_tool` serves three-way (advisory: desc + schema; binding wrapper-off: desc only; binding wrapper-on: desc + schema); new kill-switch `OPENCODE_DISABLE_TOOL_WRAPPER` (`OPENCODE_DISABLE_LAZY_TOOLS` dominates) — flag set ⇒ binding sessions render schema-eager round-1 bytes (R12-012 payload core, R12-010 Am. 2, R12-003 Am. 2, R12-005, R00-013).

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import fs from "fs/promises"
+import os from "os"
 import path from "path"
 import { tmpdir } from "./fixture/fixture"
 import { diff, loadRun, report } from "../script/measure-usage"
@@ -119,11 +120,13 @@ describe("reference-workload driver", () => {
       OPENCODE_ENABLE_PROMPT_CAPTURE: "1",
       OPENCODE_DISABLE_LAZY_TOOLS: undefined,
       OPENCODE_DISABLE_STATIC_SLIMMING: undefined,
+      OPENCODE_PIN_BINDING_VERDICT: undefined,
     })
     expect(await stubEnv(proxyDir)).toEqual({
       OPENCODE_ENABLE_PROMPT_CAPTURE: "1",
       OPENCODE_DISABLE_LAZY_TOOLS: "1",
       OPENCODE_DISABLE_STATIC_SLIMMING: "1",
+      OPENCODE_PIN_BINDING_VERDICT: undefined,
     })
 
     const proxyManifest = JSON.parse(await Bun.file(path.join(proxyDir, "manifest.json")).text())
@@ -148,6 +151,82 @@ describe("reference-workload driver", () => {
     const second = await spawnDriver(runArgs(runDir))
     expect(second.code).toBe(1)
     expect(second.stderr).toContain("not empty")
+  })
+
+  // The stub-mirror seam (ticket 27): stub-bin.ts directly, with the driver's
+  // minimal child env — the driver's pin wiring arrives with ticket 28's
+  // --pin flag (childEnv stays a fresh allowlist until then).
+  const spawnStub = async (runDir: string, env?: Record<string, string>) => {
+    await fs.mkdir(path.join(runDir, "data"), { recursive: true })
+    const proc = Bun.spawn(
+      [process.execPath, path.join(import.meta.dir, "../script/reference-workload/stub-bin.ts"), "hello world"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: process.env.HOME ?? os.homedir(),
+          XDG_DATA_HOME: path.join(runDir, "data"),
+          OPENCODE_DB: path.join(runDir, "data", "opencode.db"),
+          ...(env ?? {}),
+        },
+      },
+    )
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    if (code !== 0) throw new Error(`stub-bin exited ${code}: ${stderr || stdout}`)
+    return code
+  }
+
+  test("captures self-identify: verdict from the pin env, binary stub (R13-003/005, ticket 27)", async () => {
+    await using tmp = await tmpdir()
+    const binding = path.join(tmp.path, "binding")
+    const advisory = path.join(tmp.path, "advisory")
+    const unpinned = path.join(tmp.path, "unpinned")
+    expect(await spawnStub(binding, { OPENCODE_ENABLE_PROMPT_CAPTURE: "1", OPENCODE_PIN_BINDING_VERDICT: "binding" })).toBe(0)
+    expect(await spawnStub(advisory, { OPENCODE_ENABLE_PROMPT_CAPTURE: "1", OPENCODE_PIN_BINDING_VERDICT: "advisory" })).toBe(0)
+    expect(await spawnStub(unpinned, { OPENCODE_ENABLE_PROMPT_CAPTURE: "1" })).toBe(0)
+
+    const firstCapture = async (runDir: string) => {
+      const capturesDir = path.join(runDir, "data", "opencode", "prompt-captures", "stub-session")
+      const files = (await fs.readdir(capturesDir)).sort()
+      return JSON.parse(await Bun.file(path.join(capturesDir, files[0])).text()) as { meta: Record<string, unknown> }
+    }
+    const stubEnv = async (runDir: string) =>
+      JSON.parse(await Bun.file(path.join(runDir, "stub-env.json")).text()) as Record<string, string | undefined>
+
+    const bindingCapture = await firstCapture(binding)
+    expect(bindingCapture.meta.verdict).toBe("binding")
+    expect(bindingCapture.meta.binary).toBe("stub")
+    expect((await stubEnv(binding)).OPENCODE_PIN_BINDING_VERDICT).toBe("binding")
+
+    const advisoryCapture = await firstCapture(advisory)
+    expect(advisoryCapture.meta.verdict).toBe("advisory")
+    expect(advisoryCapture.meta.binary).toBe("stub")
+
+    const unpinnedCapture = await firstCapture(unpinned)
+    expect("verdict" in unpinnedCapture.meta).toBe(false)
+    expect(unpinnedCapture.meta.binary).toBe("stub")
+    expect((await stubEnv(unpinned)).OPENCODE_PIN_BINDING_VERDICT).toBeUndefined()
+  })
+
+  test("captures without verdict/binary still parse and report (tolerant read, SC-4)", async () => {
+    await using tmp = await tmpdir()
+    const runDir = path.join(tmp.path, "run")
+    expect((await spawnDriver(runArgs(runDir))).code).toBe(0)
+    const capturesDir = path.join(runDir, "data/opencode/prompt-captures/stub-session")
+    const files = (await fs.readdir(capturesDir)).sort()
+    const first = path.join(capturesDir, files[0])
+    const capture = JSON.parse(await Bun.file(first).text()) as { meta: Record<string, unknown> }
+    delete capture.meta.verdict
+    delete capture.meta.binary
+    await Bun.write(first, JSON.stringify(capture, null, 2))
+    const usage = report(await loadRun(runDir))
+    expect(usage.sessions).toHaveLength(1)
+    expect(usage.sessions[0].turns).toHaveLength(prompts.length)
   })
 
   test("fails loudly when the provider has no auth in real mode", async () => {
