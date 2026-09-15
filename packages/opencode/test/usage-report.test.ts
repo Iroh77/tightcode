@@ -20,7 +20,12 @@ const manifest = (input?: Partial<RunManifest>): RunManifest => ({
   ...input,
 })
 
-const capture = (sessionID: string, requestID = "msg_1", payload?: Partial<CaptureFile["payload"]>): CaptureFile => ({
+const capture = (
+  sessionID: string,
+  requestID = "msg_1",
+  payload?: Partial<CaptureFile["payload"]>,
+  meta?: Partial<CaptureFile["meta"]>,
+): CaptureFile => ({
   meta: {
     version: 1,
     sessionID,
@@ -32,6 +37,7 @@ const capture = (sessionID: string, requestID = "msg_1", payload?: Partial<Captu
     requestID,
     createdAt: "2026-09-12T00:00:00.000Z",
     optimized: { lazyTools: true, staticSlimming: true },
+    ...meta,
   },
   payload: {
     system: ["abcd"],
@@ -264,6 +270,25 @@ describe("usage-report.report", () => {
       usage: [],
     })
     expect(result.sessions[0]?.turns[0]?.estimate?.toolsTokens).toBe(0)
+  })
+
+  test("tolerant readers: round-1 captures (no meta.toolServers) and toolServers-carrying captures both parse", () => {
+    const result = report({
+      manifest: manifest(),
+      sessions: ["ses_a"],
+      captures: [
+        { file: "data/prompt-captures/ses_a/0000.json", capture: capture("ses_a", "msg_1") },
+        {
+          file: "data/prompt-captures/ses_a/0001.json",
+          capture: capture("ses_a", "msg_2", undefined, { toolServers: { glob: "firecrawl" } }),
+        },
+      ],
+      usage: [],
+    })
+    const turns = result.sessions[0]?.turns ?? []
+    expect(turns).toHaveLength(2)
+    expect(turns[0]?.estimate).toEqual({ systemTokens: 1, toolsTokens: 7, historyTokens: 9, totalTokens: 17 })
+    expect(turns[1]?.estimate).toEqual({ systemTokens: 1, toolsTokens: 7, historyTokens: 9, totalTokens: 17 })
   })
 })
 

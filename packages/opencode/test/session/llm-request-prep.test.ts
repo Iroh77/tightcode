@@ -5,6 +5,9 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Effect } from "effect"
 import { tool as aiTool, jsonSchema, type ModelMessage, type Tool } from "ai"
+import fs from "fs/promises"
+import os from "os"
+import path from "path"
 import type { Agent } from "../../src/agent/agent"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { LLMRequestPrep } from "../../src/session/llm/request"
@@ -83,6 +86,7 @@ const prepareWith = (input: {
   toolSeeds?: ToolSeed[]
   toolVerdict?: Verdict
   toolWrapper?: boolean
+  data?: string
 }) =>
   Effect.gen(function* () {
     return yield* LLMRequestPrep.prepare({
@@ -110,7 +114,7 @@ const prepareWith = (input: {
       plugin,
       promptBase: input.promptBase,
       flags: input.flags,
-      data: "/tmp",
+      data: input.data ?? "/tmp",
       isWorkflow: false,
     })
   })
@@ -731,6 +735,102 @@ describe("session.llm-request-prep.wrapper-payload (R12-012, ticket 17)", () => 
         toolVerdict: "binding",
       })
       expect(missing.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
+    }),
+  )
+})
+
+describe("session.llm-request-prep.capture-tool-servers (R10-006, ticket 23)", () => {
+  const toolSchema = (label: string): JSONSchema7 => ({
+    type: "object",
+    properties: { label: { type: "string", const: label } },
+    required: ["label"],
+  })
+
+  const fullTool = (name: string, description: string): Tool =>
+    aiTool({
+      description,
+      inputSchema: jsonSchema(toolSchema(name)),
+      execute: async () => ({ output: "", title: "", metadata: {} }),
+    })
+
+  const seed = (name: string, kind: "eager" | "deferred" = "deferred", server?: string, source: ToolSeed["source"] = "builtin"): ToolSeed => ({
+    name,
+    kind,
+    fullDescription: `${name} description`,
+    jsonSchema: toolSchema(name),
+    source,
+    ...(server ? { server } : {}),
+  })
+
+  const tools = (): Record<string, Tool> => ({
+    load_tool: fullTool("load_tool", "Loads a deferred tool"),
+    glob: fullTool("glob", "find files"),
+    bash: fullTool("bash", "Runs a shell command"),
+  })
+
+  // One MCP-attributed deferred tool amid inherent ones — the map carries the
+  // attributed entry only (server !== undefined), keyed by tool name.
+  const seeds = (): ToolSeed[] => [seed("load_tool", "eager"), seed("glob", "deferred", "firecrawl", "mcp"), seed("bash")]
+
+  // Capture dump target for the unit-level seam: prepare with the capture flag
+  // on and a real data dir, then read the dumped file back.
+  const readCaptureMeta = async (data: string, sessionID: string) => {
+    const file = await Bun.file(path.join(data, "prompt-captures", sessionID, "0000.json")).json()
+    return file as { meta: Record<string, unknown> }
+  }
+
+  const captureData = Effect.acquireRelease(
+    Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-prep-capture-"))),
+    (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
+  )
+
+  it.instance("lazy dump carries meta.toolServers for MCP-attributed frozen entries", () =>
+    Effect.gen(function* () {
+      const data = yield* captureData
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      yield* prepareWith({
+        promptBase,
+        flags: { ...base, enablePromptCapture: true },
+        sessionID: "ses_capture_servers",
+        data,
+        tools: tools(),
+        toolSeeds: seeds(),
+        toolVerdict: "advisory",
+      })
+      const file = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_servers"))
+      expect(file.meta.toolServers).toEqual({ glob: "firecrawl" })
+    }),
+  )
+
+  it.instance("bypass (kill-switch) and small dumps omit the field entirely", () =>
+    Effect.gen(function* () {
+      const data = yield* captureData
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      yield* prepareWith({
+        promptBase,
+        flags: { ...base, enablePromptCapture: true, disableLazyTools: true },
+        sessionID: "ses_capture_bypass",
+        data,
+        tools: tools(),
+        toolSeeds: seeds(),
+        toolVerdict: "advisory",
+      })
+      yield* prepareWith({
+        promptBase,
+        flags: { ...base, enablePromptCapture: true },
+        sessionID: "ses_capture_small",
+        data,
+        small: true,
+        tools: tools(),
+        toolSeeds: seeds(),
+        toolVerdict: "advisory",
+      })
+      const bypass = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_bypass"))
+      const small = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_small"))
+      expect("toolServers" in bypass.meta).toBe(false)
+      expect("toolServers" in small.meta).toBe(false)
     }),
   )
 })

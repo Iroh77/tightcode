@@ -292,7 +292,9 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     },
   }
   // Gated at the call site (decision context-observability-01): flag off = no
-  // IO. The dump sees the exact returned object (SC-1).
+  // IO. The dump sees the exact returned object (SC-1). The toolServers map
+  // rides meta only (R10-006): MCP-attributed frozen entries, absent on
+  // bypass/small turns where no frozen base exists — the payload is untouched.
   if (input.flags.enablePromptCapture)
     yield* PromptCapture.dump({
       data: input.data,
@@ -310,6 +312,13 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
           lazyTools: !input.flags.disableLazyTools,
           staticSlimming: !input.flags.disableStaticSlimming,
         },
+        ...(frozenTools
+          ? {
+              toolServers: Object.fromEntries(
+                frozenTools.entries.flatMap((entry) => (entry.server === undefined ? [] : [[entry.name, entry.server]])),
+              ),
+            }
+          : {}),
       },
     })
   return prepared

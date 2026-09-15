@@ -6,11 +6,11 @@ import { tool as aiTool, jsonSchema, type ModelMessage, type Tool } from "ai"
 import fs from "fs/promises"
 import path from "path"
 import { tmpdir } from "../fixture/fixture"
-import { PromptCapture } from "../../src/session/llm/prompt-capture"
+import { PromptCapture, type CaptureSource } from "../../src/session/llm/prompt-capture"
 import type { Prepared } from "../../src/session/llm/request"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 
-const meta = {
+const meta: CaptureSource = {
   sessionID: "ses_capture",
   providerID: "test",
   modelID: "test-model",
@@ -130,6 +130,23 @@ describe("session.prompt-capture.dump", () => {
     }
     expect(file.payload.system).toEqual(["You are a test agent.", "<env>test</env>"])
     expect(file.payload.messages).toEqual([{ role: "user", content: "hello" }])
+  })
+
+  test("meta.toolServers rides the file; the payload is untouched (R12-009 / R10-001)", async () => {
+    await using tmp = await tmpdir()
+    await dumpTo(tmp.path, { prepared: prepared(), meta: { ...meta, toolServers: { glob: "firecrawl" } } })
+    await dumpTo(tmp.path, { prepared: prepared(), meta })
+    const withMap = await readFile(path.join(tmp.path, "prompt-captures", meta.sessionID, "0000.json")) as {
+      meta: Record<string, unknown>
+      payload: { tools: Record<string, unknown> }
+    }
+    const without = await readFile(path.join(tmp.path, "prompt-captures", meta.sessionID, "0001.json")) as {
+      meta: Record<string, unknown>
+      payload: { tools: Record<string, unknown> }
+    }
+    expect(withMap.meta.toolServers).toEqual({ glob: "firecrawl" })
+    expect("toolServers" in without.meta).toBe(false)
+    expect(JSON.stringify(withMap.payload.tools)).toBe(JSON.stringify(without.payload.tools))
   })
 
   test("a non-jsonSchema tool skips the turn's dump entirely (contract violation)", async () => {

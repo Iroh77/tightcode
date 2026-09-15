@@ -20,6 +20,10 @@ export type CaptureMeta = {
   readonly requestID: string
   readonly createdAt: string
   readonly optimized: { lazyTools: boolean; staticSlimming: boolean }
+  // MCP attribution for the breakdown's cross-cut view (R10-006): tool name →
+  // sanitized MCP server, assembled from the frozen listing entries. Absent on
+  // bypass/small turns (no frozen base) — additive optional, tolerant readers.
+  readonly toolServers?: Record<string, string>
 }
 
 export type ToolCapture = {
