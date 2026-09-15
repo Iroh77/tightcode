@@ -38,7 +38,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
-import { webSearchProviderLabel } from "../../util/tool-display"
+import { deferredToolName, webSearchProviderLabel } from "../../util/tool-display"
 import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
@@ -1727,8 +1727,12 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
     get output() {
       return props.part.state.status === "completed" ? props.part.state.output : undefined
     },
+    // R12-012: wrapper calls render under the inner tool's label (generic renderer)
     get tool() {
-      return props.part.tool
+      return deferredToolName(
+        props.part.tool,
+        props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {}),
+      )
     },
     get part() {
       return props.part
@@ -2230,7 +2234,11 @@ function Task(props: ToolProps) {
     return messages().flatMap((msg) =>
       (sync.data.part[msg.id] ?? [])
         .filter((part): part is ToolPart => part.type === "tool")
-        .map((part) => ({ tool: part.tool, state: part.state })),
+        .map((part) => ({
+          // R12-012: child-session wrapper calls attribute to the inner tool
+          tool: deferredToolName(part.tool, part.state.status === "pending" ? {} : (part.state.metadata ?? {})),
+          state: part.state,
+        })),
     )
   })
 

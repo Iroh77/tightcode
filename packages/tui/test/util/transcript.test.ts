@@ -185,6 +185,28 @@ describe("transcript", () => {
       expect(result).toContain("file1.txt")
     })
 
+    test("exports a deferred_tool part under the inner tool's name (R12-012)", () => {
+      const part: Part = {
+        id: "part_1",
+        sessionID: "ses_123",
+        messageID: "msg_123",
+        type: "tool",
+        callID: "call_1",
+        tool: "deferred_tool",
+        state: {
+          status: "completed",
+          input: { name: "glob", args: '{"pattern":"*.ts"}' },
+          output: "a.ts",
+          title: "Glob",
+          metadata: { deferred_tool: { tool: "glob" } },
+          time: { start: 1000, end: 1100 },
+        },
+      }
+      const result = formatPart(part, options)
+      expect(result).toContain("**Tool: glob**")
+      expect(result).not.toContain("deferred_tool")
+    })
+
     test("formats tool output containing triple backticks without breaking markdown", () => {
       const part: Part = {
         id: "part_1",

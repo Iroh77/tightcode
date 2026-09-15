@@ -78,6 +78,27 @@ const writeMetadataWhenRunning = async (
   )
 }
 
+// Presentation unwrap (R12-012): the display name for a tool part.
+// deferred_tool parts attribute to the inner tool — the unwrap metadata key
+// first (written at dispatch start, preserved into error/completed states),
+// the wrapper's own `name` argument as the pending fallback (ToolStatePending
+// carries no metadata — the key cannot exist there yet). Every other tool
+// keeps its name; the input.name channel is only read under the
+// deferred_tool gate so it cannot leak other tools' arguments.
+export const unwrapToolName = (part: {
+  readonly tool: string
+  readonly state?: { readonly metadata?: unknown; readonly input?: unknown }
+}): string => {
+  if (part.tool !== "deferred_tool") return part.tool
+  const state = isRecord(part.state) ? part.state : undefined
+  const metadata = isRecord(state?.metadata) ? state.metadata : undefined
+  const key = isRecord(metadata?.deferred_tool) ? metadata.deferred_tool : undefined
+  if (typeof key?.tool === "string" && key.tool) return key.tool
+  const input = isRecord(state?.input) ? state.input : undefined
+  if (typeof input?.name === "string" && input.name) return input.name
+  return part.tool
+}
+
 // Dispatch (decision tool-lazy-loading-04 §4): the map is the per-turn shaped
 // deferred seeds only (permissible — shape already filtered denials). Unknown
 // or eager names error without any schema (R12-001 dominance; eager tools are

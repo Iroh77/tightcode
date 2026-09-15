@@ -6,7 +6,7 @@ import type { EffectBridge } from "../../src/effect/bridge"
 import type { SessionProcessor } from "../../src/session/processor"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { schemaBlock, type ToolSeed } from "../../src/session/tool-listing"
-import { dispatch } from "../../src/tool/deferred_tool"
+import { dispatch, unwrapToolName } from "../../src/tool/deferred_tool"
 import { delivered } from "../../src/tool/load_tool"
 import type { Tool as AITool, ToolExecutionOptions } from "ai"
 
@@ -210,5 +210,53 @@ describe("tool.deferred_tool dispatch (ticket 19)", () => {
     expect(error.message).not.toContain("pattern")
     if (part.state.status !== "running") throw new Error("part should still be running")
     expect(part.state.metadata?.load_tool).toBeUndefined()
+  })
+})
+
+describe("tool.deferred_tool unwrapToolName (ticket 20)", () => {
+  const part = (state: Record<string, unknown> | undefined, tool = "deferred_tool") => ({
+    tool,
+    state,
+  })
+
+  test("running/completed/error states unwrap via the metadata key", () => {
+    const metadata = { deferred_tool: { tool: "glob" } }
+    expect(unwrapToolName(part({ status: "running", input: {}, time: { start: 0 }, metadata }))).toBe("glob")
+    expect(
+      unwrapToolName(part({ status: "completed", input: {}, output: "ok", title: "", metadata, time: { start: 0, end: 1 } })),
+    ).toBe("glob")
+    expect(
+      unwrapToolName(part({ status: "error", input: {}, error: "boom", metadata, time: { start: 0, end: 1 } })),
+    ).toBe("glob")
+  })
+
+  test("pending state falls back to the wrapper's own name argument", () => {
+    expect(unwrapToolName(part({ status: "pending", input: { name: "glob", args: "{}" }, raw: "" }))).toBe("glob")
+  })
+
+  test("missing key and missing name keep the wrapper name", () => {
+    expect(unwrapToolName(part({ status: "pending", input: {}, raw: "" }))).toBe("deferred_tool")
+    expect(unwrapToolName(part(undefined))).toBe("deferred_tool")
+    expect(unwrapToolName(part({ status: "running", input: { name: "" }, time: { start: 0 } }))).toBe("deferred_tool")
+  })
+
+  test("malformed shapes fall back safely", () => {
+    expect(unwrapToolName(part({ status: "running", input: {}, time: { start: 0 }, metadata: "nope" }))).toBe(
+      "deferred_tool",
+    )
+    expect(
+      unwrapToolName(part({ status: "running", input: {}, time: { start: 0 }, metadata: { deferred_tool: "nope" } })),
+    ).toBe("deferred_tool")
+    expect(
+      unwrapToolName(part({ status: "running", input: {}, time: { start: 0 }, metadata: { deferred_tool: {} } })),
+    ).toBe("deferred_tool")
+    expect(unwrapToolName(part({ status: "pending", input: "nope", raw: "" }))).toBe("deferred_tool")
+  })
+
+  test("non-wrapper parts pass through even when their input carries a name", () => {
+    expect(unwrapToolName(part({ status: "running", input: { name: "legit-skill" }, time: { start: 0 } }, "skill"))).toBe(
+      "skill",
+    )
+    expect(unwrapToolName(part({ status: "running", input: { command: "ls" }, time: { start: 0 } }, "bash"))).toBe("bash")
   })
 })

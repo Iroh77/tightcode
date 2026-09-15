@@ -1,6 +1,7 @@
 import type { AssistantMessage, Part, Provider, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "./locale"
 import * as Model from "./model"
+import { deferredToolName } from "./tool-display"
 
 export type TranscriptOptions = {
   thinking: boolean
@@ -96,7 +97,9 @@ export function formatPart(part: Part, options: TranscriptOptions): string {
   }
 
   if (part.type === "tool") {
-    let result = `**Tool: ${part.tool}**\n`
+    // R12-012: wrapper calls export under the inner tool's name
+    const name = deferredToolName(part.tool, part.state.status === "pending" ? {} : (part.state.metadata ?? {}))
+    let result = `**Tool: ${name}**\n`
     if (options.toolDetails && part.state.input) {
       result += `\n**Input:**\n\`\`\`json\n${JSON.stringify(part.state.input, null, 2)}\n\`\`\`\n`
     }

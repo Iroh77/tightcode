@@ -9,6 +9,7 @@ import type {
   ToolPart,
 } from "@opencode-ai/sdk/v2"
 import { Effect } from "effect"
+import { unwrapToolName } from "@/tool/deferred_tool"
 import { ACPSession } from "./session"
 import { ACPPermission } from "./permission"
 import { partsToContentChunks, type ReplayPart } from "./content"
@@ -312,7 +313,7 @@ export class Subscription {
             sessionUpdate: "tool_call_update",
             ...completedToolUpdate({
               toolCallId: part.callID,
-              toolName: part.tool,
+              toolName: unwrapToolName(part),
               state: part.state,
               cwd,
             }),
@@ -328,7 +329,7 @@ export class Subscription {
             sessionUpdate: "tool_call_update",
             ...errorToolUpdate({
               toolCallId: part.callID,
-              toolName: part.tool,
+              toolName: unwrapToolName(part),
               state: part.state,
               cwd,
             }),
@@ -341,6 +342,10 @@ export class Subscription {
   private async runningTool(sessionId: string, part: ToolPart, cwd: string) {
     if (part.state.status !== "running") return
 
+    // R12-012 presentation unwrap: wrapper calls attribute to the inner tool.
+    // The part.tool === "bash" snapshot check below stays verbatim — a deferred
+    // inner bash does not snapshot (accepted, design round-2 table).
+    const toolName = unwrapToolName(part)
     const output = part.tool === "bash" ? shellOutputSnapshot(part.state) : undefined
     if (output !== undefined) {
       if (this.shellSnapshots.get(part.callID) === output) {
@@ -350,7 +355,7 @@ export class Subscription {
             sessionUpdate: "tool_call_update",
             ...duplicateRunningToolUpdate({
               toolCallId: part.callID,
-              toolName: part.tool,
+              toolName,
               state: part.state,
               cwd,
             }),
@@ -367,7 +372,7 @@ export class Subscription {
         sessionUpdate: "tool_call_update",
         ...runningToolUpdate({
           toolCallId: part.callID,
-          toolName: part.tool,
+          toolName,
           state: part.state,
           output,
           cwd,
@@ -385,7 +390,7 @@ export class Subscription {
         sessionUpdate: "tool_call",
         ...pendingToolCall({
           toolCallId: part.callID,
-          toolName: part.tool,
+          toolName: unwrapToolName(part),
           state: part.state,
           cwd,
         }),

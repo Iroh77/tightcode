@@ -65,6 +65,7 @@ import { partDefaultOpen } from "./part-default-open"
 import { animate } from "motion"
 import { attached, inline, kind, typeLabel } from "./message-file"
 import { readPartText } from "./message-part-text"
+import { deferredToolName } from "./deferred-tool-display"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
 
 async function writeClipboard(text: string): Promise<boolean> {
@@ -472,7 +473,11 @@ export function getToolInfo(
   metadata: Record<string, unknown> | undefined = {},
 ): ToolInfo {
   const i18n = useI18n()
-  switch (tool) {
+  // R12-012 presentation unwrap: a deferred_tool part returns the inner
+  // tool's title/icon (the wrapper input {name, args} is not re-parsed —
+  // subtitle comes from the wrapper input, mostly undefined)
+  const name = deferredToolName(tool, metadata)
+  switch (name) {
     case "read":
       return {
         icon: "glasses",
@@ -566,7 +571,7 @@ export function getToolInfo(
     default:
       return {
         icon: "mcp",
-        title: tool,
+        title: name,
       }
   }
 }
@@ -1585,7 +1590,7 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
               }
               return (
                 <ToolErrorCard
-                  tool={part().tool}
+                  tool={deferredToolName(part().tool, partMetadata())}
                   error={error()}
                   title={
                     part().tool === "websearch" ? webSearchProviderLabel(partMetadata().provider, i18n) : undefined
@@ -1611,7 +1616,9 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
             <Dynamic
               component={render()}
               input={input()}
-              tool={part().tool}
+              // R12-012: wrapper calls label under the inner tool's name
+              // (renderer dispatch stays on part().tool — deferred_tool renders generic)
+              tool={deferredToolName(part().tool, partMetadata())}
               sessionID={part().sessionID}
               metadata={partMetadata()}
               // @ts-expect-error

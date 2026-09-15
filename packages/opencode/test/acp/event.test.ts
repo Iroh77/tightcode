@@ -714,6 +714,97 @@ describe("acp event routing", () => {
     })
   })
 
+  it("attributes deferred_tool updates to the inner tool across the lifecycle", async () => {
+    const harness = createHarness()
+    await Effect.runPromise(harness.session.create({ id: "ses_wrap", cwd: "/workspace" }))
+    const callID = "call_wrap"
+    const deferredPart = {
+      id: `part_${callID}`,
+      sessionID: "ses_wrap",
+      messageID: `msg_${callID}`,
+      type: "tool",
+      callID,
+      tool: "deferred_tool",
+    } satisfies Pick<ToolPart, "id" | "sessionID" | "messageID" | "type" | "callID" | "tool">
+
+    const pending = {
+      ...deferredPart,
+      state: {
+        status: "pending",
+        input: { name: "glob", args: '{"pattern":"*.ts"}' },
+        raw: "",
+      },
+    } satisfies ToolPart
+    await harness.subscription.handle(toolUpdated(pending))
+
+    const running = {
+      ...deferredPart,
+      state: {
+        status: "running",
+        input: { name: "glob", args: '{"pattern":"*.ts"}' },
+        metadata: { deferred_tool: { tool: "glob" } },
+        time: { start: Date.now() },
+      },
+    } satisfies ToolPart
+    await harness.subscription.handle(toolUpdated(running))
+
+    const errored = {
+      ...deferredPart,
+      callID: "call_wrap_err",
+      state: {
+        status: "error",
+        input: { name: "glob", args: '{"pattern":"*.ts"}' },
+        error: "glob failed",
+        metadata: { deferred_tool: { tool: "glob" } },
+        time: { start: Date.now() - 1, end: Date.now() },
+      },
+    } satisfies ToolPart
+    await harness.subscription.handle(toolUpdated(errored))
+
+    const completed = {
+      ...deferredPart,
+      state: {
+        status: "completed",
+        input: { name: "glob", args: '{"pattern":"*.ts"}' },
+        output: "two files",
+        title: "Glob *.ts",
+        metadata: { deferred_tool: { tool: "glob" } },
+        time: { start: Date.now() - 1, end: Date.now() },
+      },
+    } satisfies ToolPart
+    await harness.subscription.handle(toolUpdated(completed))
+
+    const updates = toolUpdates(harness.updates)
+    expect(updates).toHaveLength(5)
+    // pending: the critical kind — inner name via the wrapper's own name argument
+    expect(updates[0]?.update).toMatchObject({
+      sessionUpdate: "tool_call",
+      toolCallId: callID,
+      status: "pending",
+      title: "glob",
+      kind: "search",
+    })
+    // running: inner kind/title via the unwrap metadata key
+    expect(updates[1]?.update).toMatchObject({ status: "in_progress", kind: "search", title: "glob" })
+    // error on its own call: pending re-announcement + failed update, both unwrapped
+    expect(updates[2]?.update).toMatchObject({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_wrap_err",
+      status: "pending",
+      title: "glob",
+      kind: "search",
+    })
+    expect(updates[3]?.update).toMatchObject({ status: "failed", kind: "search", title: "glob" })
+    // completed: part title passes through (the inner tool set it on the shared part)
+    expect(updates[4]?.update).toMatchObject({ status: "completed", title: "Glob *.ts" })
+
+    // verbatim guard: the published part objects are unmutated — tool stays deferred_tool
+    expect(pending.tool).toBe("deferred_tool")
+    expect(running.tool).toBe("deferred_tool")
+    expect(errored.tool).toBe("deferred_tool")
+    expect(completed.tool).toBe("deferred_tool")
+  })
+
   it("emits image attachments as ACP image content for live and replayed completed tool updates", async () => {
     const harness = createHarness()
     const image = Buffer.from("image-data").toString("base64")

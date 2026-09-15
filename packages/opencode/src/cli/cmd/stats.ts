@@ -6,6 +6,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Project } from "@/project/project"
 import { InstanceRef } from "@/effect/instance-ref"
+import { unwrapToolName } from "@/tool/deferred_tool"
 
 interface SessionStats {
   totalSessions: number
@@ -204,7 +205,9 @@ const aggregateSessionStats = Effect.fn("Cli.stats.aggregate")(function* (
 
           for (const part of message.parts) {
             if (part.type === "tool" && part.tool) {
-              sessionToolUsage[part.tool] = (sessionToolUsage[part.tool] || 0) + 1
+              // R12-012: wrapper calls count under the inner tool's name
+              const tool = unwrapToolName(part)
+              sessionToolUsage[tool] = (sessionToolUsage[tool] || 0) + 1
             }
           }
         }
