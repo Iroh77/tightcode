@@ -1,0 +1,14 @@
+{
+  "glm": {
+    "sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+    "source": "huggingface.co/zai-org/GLM-5.3-Flash",
+    "revision": "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+    "bytes": 20217442
+  },
+  "deepseek": {
+    "sha256": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+    "source": "huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731",
+    "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    "bytes": 6367146
+  }
+}

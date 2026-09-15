@@ -668,6 +668,7 @@
       },
       "devDependencies": {
         "@babel/core": "7.28.4",
+        "@huggingface/tokenizers": "0.2.0",
         "@octokit/webhooks-types": "7.6.1",
         "@opencode-ai/core": "workspace:*",
         "@opencode-ai/http-recorder": "workspace:*",
@@ -684,6 +685,7 @@
         "@types/yargs": "17.0.33",
         "@typescript/native-preview": "catalog:",
         "drizzle-orm": "catalog:",
+        "js-tiktoken": "1.0.21",
         "prettier": "3.6.2",
         "typescript": "catalog:",
         "vscode-languageserver-types": "3.17.5",
@@ -1674,6 +1676,8 @@
     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
 
     "@hono/standard-validator": ["@hono/standard-validator@0.2.0", "", { "peerDependencies": { "@standard-schema/spec": "1.0.0", "hono": ">=3.9.0" } }, "sha512-pFq0UVAnjzXcDAgqFpDeVL3MOUPrlIh/kPqBDvbCYoThVhhS+Vf37VcdsakdOFFGiqoiYVxp3LifXFhGhp/rgQ=="],
+
+    "@huggingface/tokenizers": ["@huggingface/tokenizers@0.2.0", "", {}, "sha512-LidMHe1FpcSYH4vcSjXooda34pC0M8m1gmDOv7SQi6Iv+ib1zX7J3sHBCC9/3FPCkn2k1b55FneVqMRxrr99pg=="],
 
     "@ibm/plex": ["@ibm/plex@6.4.1", "", { "dependencies": { "@ibm/telemetry-js": "^1.5.1" } }, "sha512-fnsipQywHt3zWvsnlyYKMikcVI7E2fEwpiPnIHFqlbByXVfQfANAAeJk1IV4mNnxhppUIDlhU0TzwYwL++Rn2g=="],
 
@@ -4148,6 +4152,8 @@
     "js-beautify": ["js-beautify@1.15.4", "", { "dependencies": { "config-chain": "^1.1.13", "editorconfig": "^1.0.4", "glob": "^10.4.2", "js-cookie": "^3.0.5", "nopt": "^7.2.1" }, "bin": { "css-beautify": "js/bin/css-beautify.js", "html-beautify": "js/bin/html-beautify.js", "js-beautify": "js/bin/js-beautify.js" } }, "sha512-9/KXeZUKKJwqCXUdBxFJ3vPh467OCckSBmYDwSK/EtV090K+iMJ7zx2S3HLVDIWFQdqMIsZWbnaGiba18aWhaA=="],
 
     "js-cookie": ["js-cookie@3.0.8", "", {}, "sha512-yeJd4aNAdYZQjaon2bpD/Gb0B/omw7HQOsynXXcOiWVCacbBcPlgn8S/d1X6blFSaHao7ozqtW7NZW19xpCtIw=="],
+
+    "js-tiktoken": ["js-tiktoken@1.0.21", "", { "dependencies": { "base64-js": "^1.5.1" } }, "sha512-biOj/6M5qdgx5TKjDnFT1ymSpM5tbd3ylwDtrQvFQSu0Z7bBYko2dF+W/aUkXUPuk6IVpRxk/3Q2sHOzGlS36g=="],
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 

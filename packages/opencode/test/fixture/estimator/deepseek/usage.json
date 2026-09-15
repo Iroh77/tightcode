@@ -1,0 +1,15 @@
+{
+  "reason": "tool-calls",
+  "type": "step-finish",
+  "tokens": {
+    "total": 5812,
+    "input": 3947,
+    "output": 37,
+    "reasoning": 36,
+    "cache": {
+      "write": 0,
+      "read": 1792
+    }
+  },
+  "cost": 0.000178056
+}
