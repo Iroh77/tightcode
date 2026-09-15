@@ -47,6 +47,37 @@ const writeMetadata = (input: { run: EffectBridge.Shape; updateToolCall: UpdateT
     ),
   )
 
+// The ai-sdk may begin executing the tool before the processor has consumed
+// the stream's "tool-call" part, so the part can still be pending at dispatch
+// start and a single write races the pending→running transition (the running
+// transition rebuilds the state, dropping any earlier write). The stream order
+// guarantees "tool-call" (running) is consumed strictly before "tool-result"
+// (failToolCall), so waiting for the running status lands the write before the
+// error state is written. Bounded per R00-010; a part that is already settled
+// or an exhausted wait logs — the marker would otherwise be lost silently.
+const METADATA_ATTEMPTS = 100
+const METADATA_DELAY_MS = 5
+
+const writeMetadataWhenRunning = async (
+  input: { run: EffectBridge.Shape; updateToolCall: UpdateToolCall },
+  callID: string,
+  patch: Record<string, unknown>,
+) => {
+  for (let attempt = 0; attempt < METADATA_ATTEMPTS; attempt++) {
+    const part = await writeMetadata(input, callID, patch)
+    if (!part) break
+    if (part.state.status === "running") return
+    if (part.state.status !== "pending") break
+    await Bun.sleep(METADATA_DELAY_MS)
+  }
+  await input.run.promise(
+    Effect.logWarning("deferred_tool metadata write did not reach the running part", {
+      callID,
+      keys: Object.keys(patch),
+    }),
+  )
+}
+
 // Dispatch (decision tool-lazy-loading-04 §4): the map is the per-turn shaped
 // deferred seeds only (permissible — shape already filtered denials). Unknown
 // or eager names error without any schema (R12-001 dominance; eager tools are
@@ -65,7 +96,7 @@ export const dispatch = (input: {
   async (args: unknown, options: ToolExecutionOptions) => {
     const call = isRecord(args) ? args : {}
     const name = typeof call.name === "string" ? call.name : ""
-    await writeMetadata(input, options.toolCallId, { deferred_tool: { tool: name } })
+    await writeMetadataWhenRunning(input, options.toolCallId, { deferred_tool: { tool: name } })
     const seed = input.seeds.find((item) => item.name === name)
     if (!seed)
       throw new Error(`Unknown deferred tool: ${name}. Deferred tools are listed in the <deferred_tools> catalog blocks.`)
@@ -75,11 +106,11 @@ export const dispatch = (input: {
     try {
       parsedArgs = JSON.parse(typeof call.args === "string" ? call.args : "")
     } catch (error) {
-      await writeMetadata(input, options.toolCallId, { load_tool: { tools: [name] } })
+      await writeMetadataWhenRunning(input, options.toolCallId, { load_tool: { tools: [name] } })
       throw new Error(`${errorMessage(error)}\n\n${schemaBlock(seed)}`)
     }
     if (!isRecord(parsedArgs)) {
-      await writeMetadata(input, options.toolCallId, { load_tool: { tools: [name] } })
+      await writeMetadataWhenRunning(input, options.toolCallId, { load_tool: { tools: [name] } })
       throw new Error(`Arguments must be a JSON object holding the ${name} tool's arguments.\n\n${schemaBlock(seed)}`)
     }
     const inner = input.shaped[name]
