@@ -1,12 +1,20 @@
 import type { JSONSchema7 } from "@ai-sdk/provider"
+import type { Tool, ToolExecutionOptions } from "ai"
+import { Effect } from "effect"
+import type { EffectBridge } from "../effect/bridge"
+import type { SessionProcessor } from "../session/processor"
+import { schemaBlock, type ToolSeed } from "../session/tool-listing"
+import { errorMessage } from "../util/error"
+import { isRecord } from "../util/record"
 import DESCRIPTION from "./deferred_tool.txt"
 
 // R12-012: the wrapper's single eager meta-tool, defined once with a closed,
 // deployment-uniform schema (R12-009 — identical shape across provider
 // families). The seed enters the listing through SessionTools.resolve on
-// binding+wrapper sessions only; the dispatch executor and the AITool
-// construction live at that confluence (ticket 19), so this file owns the
-// frozen definition facts the seed and the catalog consumers read.
+// binding+wrapper sessions only; the AITool instance is constructed at that
+// confluence closing over the completed shaped record — never a registry
+// builtin (decision tool-lazy-loading-04 §1). This file owns the frozen
+// definition facts plus the dispatch executor.
 export const DEFERRED_TOOL_SCHEMA: JSONSchema7 = {
   type: "object",
   properties: {
@@ -18,3 +26,66 @@ export const DEFERRED_TOOL_SCHEMA: JSONSchema7 = {
 }
 
 export const DEFERRED_TOOL_DESCRIPTION = DESCRIPTION
+
+// The unwrap metadata key (decision tool-lazy-loading-04 §3): rides the
+// ToolPart's state.metadata, mirroring the load_tool marker convention.
+// Written at dispatch start on the running part — failToolCall preserves
+// running metadata, so the error state keeps it — and merged into the
+// returned output's metadata, because completeToolCall writes output.metadata
+// over the part. History stays verbatim: metadata is not model-visible.
+type UpdateToolCall = SessionProcessor.Handle["updateToolCall"]
+
+const writeMetadata = (input: { run: EffectBridge.Shape; updateToolCall: UpdateToolCall }, callID: string, patch: Record<string, unknown>) =>
+  input.run.promise(
+    input.updateToolCall(callID, (part) => {
+      if (part.state.status !== "running") return part
+      return { ...part, state: { ...part.state, metadata: { ...part.state.metadata, ...patch } } }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("deferred_tool could not update the tool part metadata", { callID, cause }).pipe(Effect.asVoid),
+      ),
+    ),
+  )
+
+// Dispatch (decision tool-lazy-loading-04 §4): the map is the per-turn shaped
+// deferred seeds only (permissible — shape already filtered denials). Unknown
+// or eager names error without any schema (R12-001 dominance; eager tools are
+// reachable directly); unparseable args on a known name deliver the inner
+// tool's full schema with the load_tool marker (schema-in-error, the
+// binding-session stand-in for R12-006). Otherwise the withFallback-wrapped
+// inner closure runs untouched: permission ruleset, plugin triggers and
+// fallback semantics unwrap naturally — no wrapper-level triggers, no
+// double-append.
+export const dispatch = (input: {
+  seeds: ToolSeed[]
+  shaped: Record<string, Tool>
+  run: EffectBridge.Shape
+  updateToolCall: UpdateToolCall
+}) =>
+  async (args: unknown, options: ToolExecutionOptions) => {
+    const call = isRecord(args) ? args : {}
+    const name = typeof call.name === "string" ? call.name : ""
+    await writeMetadata(input, options.toolCallId, { deferred_tool: { tool: name } })
+    const seed = input.seeds.find((item) => item.name === name)
+    if (!seed)
+      throw new Error(`Unknown deferred tool: ${name}. Deferred tools are listed in the <deferred_tools> catalog blocks.`)
+    if (seed.kind === "eager")
+      throw new Error(`${name} is not a deferred tool — it is listed in the tool listing, call it directly.`)
+    let parsedArgs: unknown
+    try {
+      parsedArgs = JSON.parse(typeof call.args === "string" ? call.args : "")
+    } catch (error) {
+      await writeMetadata(input, options.toolCallId, { load_tool: { tools: [name] } })
+      throw new Error(`${errorMessage(error)}\n\n${schemaBlock(seed)}`)
+    }
+    if (!isRecord(parsedArgs)) {
+      await writeMetadata(input, options.toolCallId, { load_tool: { tools: [name] } })
+      throw new Error(`Arguments must be a JSON object holding the ${name} tool's arguments.\n\n${schemaBlock(seed)}`)
+    }
+    const inner = input.shaped[name]
+    if (!inner?.execute) throw new Error(`${name} has no executable closure in this turn.`)
+    const output = await inner.execute(parsedArgs, options)
+    if (!isRecord(output)) return output
+    const metadata = isRecord(output.metadata) ? output.metadata : {}
+    return { ...output, metadata: { ...metadata, deferred_tool: { tool: name } } }
+  }

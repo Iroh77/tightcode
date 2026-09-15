@@ -485,3 +485,252 @@ describe("session.tools direct-call fallback (ticket 07)", () => {
     }),
   )
 })
+
+describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
+  const globSchema: JSONSchema7 = {
+    type: "object",
+    properties: { pattern: { type: "string" }, path: { type: "string" } },
+    required: ["pattern"],
+  }
+  const messageID = MessageID.ascending()
+
+  const globRegistry = (execute: Tool.Def["execute"]) =>
+    Layer.succeed(
+      ToolRegistry.Service,
+      ToolRegistry.Service.of({
+        ids: () => Effect.succeed(["glob"]),
+        all: () => Effect.succeed([]),
+        named: () => Effect.die("unused"),
+        tools: () =>
+          Effect.succeed([
+            {
+              id: "glob",
+              description: "finds files",
+              parameters: Schema.Struct({}),
+              jsonSchema: globSchema,
+              execute,
+            } satisfies Tool.Def,
+          ]),
+      }),
+    )
+
+  const okGlob = globRegistry(() =>
+    Effect.succeed({ title: "glob", metadata: { files: 3 }, output: "a.ts\nb.ts" }),
+  )
+  const failingGlob = globRegistry(() =>
+    // Production shape: Tool.wrap raises the decode failure as a defect
+    // (Effect.orDie), which the fallback catches.
+    Effect.die(new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" })),
+  )
+
+  const observed: string[] = []
+  const verdictObserve = Layer.succeed(
+    BindingVerdict.Service,
+    BindingVerdict.Service.of({
+      resolve: () => Effect.succeed("binding" as Verdict),
+      observe: () =>
+        Effect.sync(() => {
+          observed.push("schema-violation")
+        }),
+    }),
+  )
+
+  const itWrapper = testEffect(Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("binding"), providerStub))
+  const itWrapperFailing = testEffect(
+    Layer.mergeAll(baseLayer({ registry: failingGlob }), verdictObserve, providerStub),
+  )
+  const itDenied = testEffect(Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("binding"), providerStub))
+  const itAdvisory = testEffect(
+    Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("advisory"), providerStub),
+  )
+  const itBindingNoWrapper = testEffect(
+    Layer.mergeAll(
+      baseLayer({ flags: { disableToolWrapper: true }, registry: okGlob }),
+      verdictStub("binding"),
+      providerStub,
+    ),
+  )
+  const itKillSwitch = testEffect(
+    Layer.mergeAll(
+      baseLayer({ flags: { disableLazyTools: true }, registry: okGlob }),
+      verdictStub(undefined),
+      providerStub,
+    ),
+  )
+
+  // A running deferred_tool part plus the resolve input whose updateToolCall
+  // writes through to it — mirroring what the processor holds while execute()
+  // is in flight (same shape as failingResolveInput above).
+  const resolveInput = (state: SessionV1.ToolPart, agentOverride?: Agent.Info) => ({
+    agent: agentOverride ?? agent,
+    model,
+    session: sessionStub,
+    processor: {
+      message: {
+        id: messageID,
+        sessionID,
+        role: "assistant",
+        parentID: MessageID.ascending(),
+        agent: "build",
+        mode: "build",
+        path: { cwd: "/tmp", root: "/tmp" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelV2.ID.make("test-model"),
+        providerID: ProviderV2.ID.make("test"),
+        time: { created: 1 },
+      } satisfies SessionV1.Assistant,
+      updateToolCall: (_toolCallID: string, update: (part: SessionV1.ToolPart) => SessionV1.ToolPart) =>
+        Effect.sync(() => {
+          state.state = update(state).state
+          return state
+        }),
+      completeToolCall: () => Effect.void,
+    },
+    bypassAgentCheck: false,
+    messages: [] as SessionV1.WithParts[],
+    promptOps: promptOpsStub,
+  })
+
+  const metaPart = (): SessionV1.ToolPart => ({
+    id: PartID.ascending(),
+    sessionID,
+    messageID,
+    type: "tool",
+    tool: "deferred_tool",
+    callID,
+    state: { status: "running", input: {}, time: { start: 0 } },
+  })
+
+  const opts = () => ({ toolCallId: callID, abortSignal: new AbortController().signal, messages: [] })
+
+  const rejectionOf = (execute: unknown, args: unknown) =>
+    Effect.promise(() =>
+      (execute as (args: unknown, options: ToolExecutionOptions) => Promise<unknown>)(args, opts()).then(
+        () => new Error("expected the dispatch to fail"),
+        (error: unknown) => error,
+      ),
+    )
+
+  itWrapper.effect(
+    "binding+wrapper constructs the meta-tool; dispatch executes the inner tool through its wrapped closure",
+    () =>
+      Effect.gen(function* () {
+        const state = metaPart()
+        const resolved = yield* SessionTools.resolve(resolveInput(state))
+        expect(resolved.wrapper).toBe(true)
+        const meta = resolved.tools.deferred_tool
+        const execute = meta?.execute
+        if (!execute) throw new Error("deferred_tool must be constructed on wrapper sessions")
+        expect(meta?.description).toBe(DEFERRED_TOOL_DESCRIPTION)
+        expect(meta?.inputSchema).toEqual(jsonSchema(DEFERRED_TOOL_SCHEMA))
+
+        const output = yield* Effect.promise(() => execute({ name: "glob", args: '{"pattern":"*.ts"}' }, opts()))
+        // the inner output with the unwrap metadata merged — what
+        // completeToolCall writes over the part (the completed part carries it)
+        expect(output).toEqual({
+          title: "glob",
+          metadata: { files: 3, deferred_tool: { tool: "glob" } },
+          output: "a.ts\nb.ts",
+        })
+        // unwrap metadata landed on the running part pre-execute
+        if (state.state.status !== "running") throw new Error("part should still be running")
+        expect(state.state.metadata?.deferred_tool).toEqual({ tool: "glob" })
+      }),
+  )
+
+  itWrapper.effect("unknown name through resolve: clear error, no schema, no marker", () =>
+    Effect.gen(function* () {
+      const state = metaPart()
+      const resolved = yield* SessionTools.resolve(resolveInput(state))
+      const meta = resolved.tools.deferred_tool
+      if (!meta?.execute) throw new Error("deferred_tool must be constructed on wrapper sessions")
+      const error = yield* rejectionOf(meta.execute, { name: "bogus", args: "{}" })
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain(
+        "Unknown deferred tool: bogus. Deferred tools are listed in the <deferred_tools> catalog blocks.",
+      )
+      expect((error as Error).message).not.toContain('"pattern"')
+      if (state.state.status !== "running") throw new Error("part should still be running")
+      expect(state.state.metadata?.load_tool).toBeUndefined()
+      expect(state.state.metadata?.deferred_tool).toEqual({ tool: "bogus" })
+    }),
+  )
+
+  itDenied.effect("non-permissible name: the dispatch map holds only permissible seeds — no schema leak (R12-001)", () =>
+    Effect.gen(function* () {
+      const state = metaPart()
+      const denyingAgent: Agent.Info = {
+        ...agent,
+        permission: [{ permission: "glob", pattern: "*", action: "deny" }],
+      }
+      const resolved = yield* SessionTools.resolve(resolveInput(state, denyingAgent))
+      expect(resolved.seeds.some((seed) => seed.name === "glob")).toBe(false)
+      const meta = resolved.tools.deferred_tool
+      if (!meta?.execute) throw new Error("deferred_tool must be constructed on wrapper sessions")
+      const error = yield* rejectionOf(meta.execute, { name: "glob", args: '{"pattern":"*"}' })
+      expect((error as Error).message).toContain("Unknown deferred tool: glob")
+      expect((error as Error).message).not.toContain('"pattern"')
+      if (state.state.status !== "running") throw new Error("part should still be running")
+      expect(state.state.metadata?.load_tool).toBeUndefined()
+    }),
+  )
+
+  itWrapper.effect("unparseable args on a known name: schema-in-error + delivery marker on the part", () =>
+    Effect.gen(function* () {
+      const state = metaPart()
+      const resolved = yield* SessionTools.resolve(resolveInput(state))
+      const meta = resolved.tools.deferred_tool
+      if (!meta?.execute) throw new Error("deferred_tool must be constructed on wrapper sessions")
+      const error = yield* rejectionOf(meta.execute, { name: "glob", args: "{oops" })
+      expect((error as Error).message).toContain(JSON.stringify(globSchema, null, 2))
+      if (state.state.status !== "running") throw new Error("part should still be running")
+      expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
+      expect(state.state.metadata?.deferred_tool).toEqual({ tool: "glob" })
+    }),
+  )
+
+  itWrapperFailing.effect("inner InvalidArgumentsError rides the fallback: schema once, marker once, observe fed", () =>
+    Effect.gen(function* () {
+      observed.length = 0
+      const state = metaPart()
+      const resolved = yield* SessionTools.resolve(resolveInput(state))
+      const meta = resolved.tools.deferred_tool
+      if (!meta?.execute) throw new Error("deferred_tool must be constructed on wrapper sessions")
+      const error = yield* rejectionOf(meta.execute, { name: "glob", args: '{"pattern":"*"}' })
+      const message = (error as Error).message
+      expect(message).toContain("missing pattern")
+      expect(message.split(JSON.stringify(globSchema, null, 2)).length - 1).toBe(1)
+      if (state.state.status !== "running") throw new Error("part should still be running")
+      expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
+      expect(state.state.metadata?.deferred_tool).toEqual({ tool: "glob" })
+      expect(observed).toEqual(["schema-violation"])
+    }),
+  )
+
+  itAdvisory.effect("advisory: no meta-tool constructed, universe and record stay clean", () =>
+    Effect.gen(function* () {
+      const resolved = yield* SessionTools.resolve(resolveInput(metaPart()))
+      expect(resolved.tools.deferred_tool).toBeUndefined()
+      expect(resolved.seeds.some((seed) => seed.name === "deferred_tool")).toBe(false)
+    }),
+  )
+
+  itBindingNoWrapper.effect("wrapper kill-switch: no meta-tool, schema-eager binding stands", () =>
+    Effect.gen(function* () {
+      const resolved = yield* SessionTools.resolve(resolveInput(metaPart()))
+      expect(resolved.wrapper).toBe(false)
+      expect(resolved.tools.deferred_tool).toBeUndefined()
+      expect(resolved.seeds.some((seed) => seed.name === "deferred_tool")).toBe(false)
+    }),
+  )
+
+  itKillSwitch.effect("lazy-tools kill-switch: no meta-tool, no verdict, upstream shapes", () =>
+    Effect.gen(function* () {
+      const resolved = yield* SessionTools.resolve(resolveInput(metaPart()))
+      expect(resolved.verdict).toBeUndefined()
+      expect(resolved.tools.deferred_tool).toBeUndefined()
+      expect(resolved.seeds).toEqual([])
+    }),
+  )
+})

@@ -178,7 +178,9 @@ function validate(universe: UniverseTool[]) {
 // this module.
 type UpdateToolCall = SessionProcessor.Handle["updateToolCall"]
 
-const schemaBlock = (seed: ToolSeed) =>
+// Shared schema-in-error block: the direct-call fallback (R12-006) and the
+// deferred_tool dispatch (R12-012) append the same round-1 format.
+export const schemaBlock = (seed: ToolSeed) =>
   [`The ${seed.name} tool has not been loaded. Its full input schema is:`, "", JSON.stringify(seed.jsonSchema, null, 2)].join("\n")
 
 // R12-006 direct-call fallback (decision tool-lazy-loading-02 §3/§4): a

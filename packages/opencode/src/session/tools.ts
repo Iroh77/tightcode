@@ -7,7 +7,7 @@ import { MCP } from "@/mcp"
 import { McpCatalog } from "@/mcp/catalog"
 import { Permission } from "@/permission"
 import { Tool } from "@/tool/tool"
-import { DEFERRED_TOOL_DESCRIPTION, DEFERRED_TOOL_SCHEMA } from "@/tool/deferred_tool"
+import { DEFERRED_TOOL_DESCRIPTION, DEFERRED_TOOL_SCHEMA, dispatch } from "@/tool/deferred_tool"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
@@ -555,37 +555,42 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
   })
   const listing = new Map(ToolListing.render(seeds, verdict, wrapperActive).map((entry) => [entry.name, entry]))
-  // R12-006: every deferred entry's execute is wrapped once here — the single
-  // confluence of the built-in, resource and MCP closures — so the fallback
-  // covers all three families uniformly (R12-009) and processor.ts stays
-  // byte-identical upstream (decision tool-lazy-loading-02).
   const observe = bindingVerdict.observe({ model: input.model, provider: providerInfo, reason: "schema-violation" })
   const seedsByName = new Map(seeds.map((seed) => [seed.name, seed]))
   const shaped = Object.fromEntries(
     Object.entries(tools).map(([name, entry]) => {
       const view = listing.get(name)
       const seed = seedsByName.get(name)
-      if (!view || !seed || !entry.execute) return [name, entry]
+      if (!seed || !entry.execute) return [name, entry]
+      // R12-006: every deferred entry's execute is wrapped once here — the
+      // single confluence of the built-in, resource and MCP closures — so the
+      // fallback covers all three families uniformly (R12-009) and
+      // processor.ts stays byte-identical upstream (decision
+      // tool-lazy-loading-02). The wrap does not depend on the listing view:
+      // on wrapper sessions the deferred view is omitted (the payload drops
+      // the entry) but the wrapped closure remains deferred_tool's dispatch
+      // target (decision tool-lazy-loading-04 §4).
+      const wrapped =
+        seed.kind === "deferred"
+          ? {
+              execute: ToolListing.withFallback(
+                {
+                  seed,
+                  messages: input.messages,
+                  run,
+                  updateToolCall: input.processor.updateToolCall,
+                  observe,
+                },
+                entry.execute,
+              ),
+            }
+          : {}
       return [
         name,
         {
           ...entry,
-          description: view.description,
-          inputSchema: jsonSchema(view.jsonSchema),
-          ...(seed.kind === "deferred"
-            ? {
-                execute: ToolListing.withFallback(
-                  {
-                    seed,
-                    messages: input.messages,
-                    run,
-                    updateToolCall: input.processor.updateToolCall,
-                    observe,
-                  },
-                  entry.execute,
-                ),
-              }
-            : {}),
+          ...(view ? { description: view.description, inputSchema: jsonSchema(view.jsonSchema) } : {}),
+          ...wrapped,
         },
       ]
     }),
@@ -593,6 +598,16 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   // Unlisted deferred entries keep their full-fact AITool shapes here — the
   // payload omission happens at impose (request.ts), never by mutating this
   // record: the closures are the dispatch targets (decision tool-lazy-loading-04).
+  // The meta-tool's AITool joins last, closing over the completed shaped
+  // record: its dispatch map reads the withFallback-wrapped deferred closures
+  // (decision tool-lazy-loading-04 §1/§4). Constructed only when wrapperActive
+  // — advisory and kill-switch sessions never hold the name anywhere.
+  if (wrapperActive)
+    shaped["deferred_tool"] = tool({
+      description: DEFERRED_TOOL_DESCRIPTION,
+      inputSchema: jsonSchema(DEFERRED_TOOL_SCHEMA),
+      execute: dispatch({ seeds, shaped, run, updateToolCall: input.processor.updateToolCall }),
+    })
   return { tools: shaped, seeds, verdict, wrapper: wrapperActive }
 })
 
