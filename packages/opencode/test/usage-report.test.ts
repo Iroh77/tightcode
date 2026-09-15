@@ -676,7 +676,12 @@ describe("campaign aggregation (v2 report)", () => {
     expect(forkLeg.metrics.coldStartInput).toEqual({ median: 20, min: 10, max: 30, values: [10, 30] })
     expect(forkLeg.metrics.sessionInput).toEqual({ median: 26, min: 16, max: 36, values: [16, 36] })
     expect(forkLeg.metrics.payloadChars).toEqual({ median: 93, min: 62, max: 124, values: [62, 124] })
-    expect(forkLeg.coldStartAttribution).toBeNull()
+    const turn0 = await turn0Of(path.join(tmp.path, "00-p1-fork"))
+    expect(forkLeg.coldStartAttribution).toEqual({
+      system: { median: turn0.system, min: turn0.system, max: turn0.system, values: [turn0.system, turn0.system] },
+      tools: { median: turn0.tools, min: turn0.tools, max: turn0.tools, values: [turn0.tools, turn0.tools] },
+      history: { median: turn0.history, min: turn0.history, max: turn0.history, values: [turn0.history, turn0.history] },
+    })
     expect(forkLeg.diagnostics.cacheCollapses).toEqual([])
     const upstreamLeg = p1.legs[1]
     expect(upstreamLeg.shape).toBe("upstream")
@@ -858,5 +863,90 @@ describe("campaign aggregation (v2 report)", () => {
     const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited])
     expect(code).toBe(1)
     expect(stderr).toMatch(/incomplete/)
+  })
+
+  // Estimator-sourced cold-start attribution (R13-006 + SC-5, ticket 31): the
+  // leg's `coldStartAttribution` medians are the breakdown core's own turn-0
+  // category totals — never a second estimator/parser path, so the drift test
+  // runs both entry points on one fixture (breakdown() directly vs
+  // campaignReport over the same run dirs).
+
+  const turn0Of = async (runDir: string) => {
+    const run = await loadRun(runDir)
+    const { breakdown } = await import("../script/breakdown")
+    const turn0 = breakdown({ manifest: run.manifest, captures: run.captures, usage: run.usage }).sessions[0]!.turns[0]!
+    return {
+      system: turn0.system.total,
+      tools: turn0.tools.total,
+      history: turn0.history.total,
+      adapter: turn0.estimator.adapter,
+    }
+  }
+
+  test("attribution medians match per-run breakdown turn-0 categories (no recomputation drift); adapter engaged", async () => {
+    await using tmp = await tmpdir()
+    // Differing turn-0 payloads so the leg median aggregates distinct values.
+    const differing = (index: number): RunEntry => ({
+      ...forkRep(index),
+      captures: [
+        {
+          sessionID: "ses_a",
+          seq: 0,
+          file: capture("ses_a", "msg_1", { system: index % 2 === 0 ? ["abcd"] : ["abcd", "efghij"] }),
+        },
+        { sessionID: "ses_a", seq: 1, file: capture("ses_a", "msg_2") },
+      ],
+    })
+    const entries = [differing(0), differing(1), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const result = await campaignReport(tmp.path)
+    const forkLeg = result.phases[0].legs[0]
+    const run0 = await turn0Of(path.join(tmp.path, "00-p1-fork"))
+    const run1 = await turn0Of(path.join(tmp.path, "01-p1-fork"))
+    expect(run0.adapter).toBe("o200k")
+    expect(run1.adapter).toBe("o200k")
+    expect(forkLeg.coldStartAttribution).toEqual({
+      system: { median: (run0.system + run1.system) / 2, min: run0.system, max: run1.system, values: [run0.system, run1.system] },
+      tools: { median: (run0.tools + run1.tools) / 2, min: run0.tools, max: run1.tools, values: [run0.tools, run1.tools] },
+      history: { median: (run0.history + run1.history) / 2, min: run0.history, max: run1.history, values: [run0.history, run1.history] },
+    })
+  })
+
+  test("attribution: capture-bearing legs carry the full triple, upstream legs null; absent from pair metrics, derivable per leg", async () => {
+    await using tmp = await tmpdir()
+    const entries = [forkRep(0), forkRep(1), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const result = await campaignReport(tmp.path)
+    const [forkLeg, upstreamLeg] = result.phases[0].legs
+    const turn0 = await turn0Of(path.join(tmp.path, "00-p1-fork"))
+    expect(forkLeg.coldStartAttribution).toEqual({
+      system: { median: turn0.system, min: turn0.system, max: turn0.system, values: [turn0.system, turn0.system] },
+      tools: { median: turn0.tools, min: turn0.tools, max: turn0.tools, values: [turn0.tools, turn0.tools] },
+      history: { median: turn0.history, min: turn0.history, max: turn0.history, values: [turn0.history, turn0.history] },
+    })
+    expect(upstreamLeg.coldStartAttribution).toBeNull()
+    const comparison = result.phases[0].comparisons[0]
+    expect(comparison.kind).toBe("fork-vs-upstream")
+    expect("coldStartAttribution" in comparison).toBe(false)
+    expect(JSON.stringify(forkLeg)).toContain("coldStartAttribution")
+  })
+
+  test("attribution: a capture-less run in a capture-bearing leg → dispersion over the remaining runs + warning naming it", async () => {
+    await using tmp = await tmpdir()
+    const captureless = { ...forkRep(0), manifest: forkManifest({ capturesDir: null }) }
+    const entries = [captureless, forkRep(1), upstreamRep(2), upstreamRep(3)]
+    await writeCampaignDir(tmp.path, p1Doc(), entries)
+    const result = await campaignReport(tmp.path)
+    const turn0 = await turn0Of(path.join(tmp.path, "01-p1-fork"))
+    const forkLeg = result.phases[0].legs[0]
+    expect(forkLeg.coldStartAttribution).toEqual({
+      system: { median: turn0.system, min: turn0.system, max: turn0.system, values: [turn0.system] },
+      tools: { median: turn0.tools, min: turn0.tools, max: turn0.tools, values: [turn0.tools] },
+      history: { median: turn0.history, min: turn0.history, max: turn0.history, values: [turn0.history] },
+    })
+    expect(result.warnings).toEqual([
+      expect.stringMatching(/payloadChars in leg fork unavailable for run dirs unavailable in 00-p1-fork/),
+      expect.stringMatching(/coldStartAttribution in leg fork unavailable for run dirs unavailable in 00-p1-fork/),
+    ])
   })
 })

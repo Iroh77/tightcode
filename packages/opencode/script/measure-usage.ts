@@ -267,6 +267,24 @@ export const payloadChars = (run: Run): number | null => {
   }, 0)
 }
 
+// Estimator-sourced cold-start attribution (R13-006 + SC-5, ticket 31): per
+// run, feature 10's breakdown() core over the run — turn 0 of the first
+// session's system/tools/history category totals. Never a second
+// estimator/parser path: the figures are the breakdown's own (its
+// `estimator.adapter` rides through, so they are interpretable per
+// tokenizer). Null when the run has no captures (upstream legs) or no
+// projected turn 0. Dynamic import because breakdown.ts consumes this
+// module's readers at runtime — a static import would create exactly the
+// runtime cycle the type-only reference-workload import above avoids.
+export type RunAttribution = { system: number; tools: number; history: number }
+
+export const runAttribution = async (run: Run): Promise<RunAttribution | null> => {
+  if (run.captures.length === 0) return null
+  const { breakdown } = await import("./breakdown")
+  const turn0 = breakdown({ manifest: run.manifest, captures: run.captures, usage: run.usage }).sessions[0]?.turns[0]
+  return turn0 ? { system: turn0.system.total, tools: turn0.tools.total, history: turn0.history.total } : null
+}
+
 // Cache-collapse heuristic flag (R13-001): turn i ≥ 1 flagged when its
 // cacheRead collapsed below the ratio × previous turn's total input.
 // Diagnostic-only by contract — prompt-base append batches legitimately fire
@@ -451,7 +469,7 @@ export type LegReport = {
     sessionInput: Dispersion | null
     payloadChars: Dispersion | null
   }
-  coldStartAttribution: { system: Dispersion; tools: Dispersion; history: Dispersion } | null // ticket 31 (SC-5)
+  coldStartAttribution: { system: Dispersion; tools: Dispersion; history: Dispersion } | null // SC-5 (ticket 31): breakdown-core turn-0 category medians; null on capture-less legs
   diagnostics: { cacheCollapses: Array<{ runDir: string; turn: number; cacheRead: number; expectedPrefix: number }> }
 }
 
@@ -544,28 +562,47 @@ const dispersion = (values: number[]): Dispersion => {
   return { median, min: sorted[0], max: sorted[sorted.length - 1], values }
 }
 
-// One metric column over a leg's runs: null when no run provides it;
-// partial availability is a warning naming the runs (surfaced, never
-// silently folded — R00-010).
+// Availability rule shared by every leg column: no warning when all runs (or
+// none) provide a value; partial availability is a warning naming the runs —
+// surfaced, never silently folded (R00-010).
+const availableValues = <T>(runDirs: string[], values: Array<T | null>, warnings: string[], label: string): T[] => {
+  const present = values.filter((value): value is T => value !== null)
+  if (present.length === 0 || present.length === values.length) return present
+  const missing = runDirs.filter((_, i) => values[i] === null)
+  warnings.push(`measure-usage: ${label} unavailable in ${missing.join(", ")} — dispersion over the remaining runs`)
+  return present
+}
+
+// One metric column over a leg's runs: null when no run provides it.
 const legMetric = (
   runDirs: string[],
   values: Array<number | null>,
   warnings: string[],
   label: string,
 ): Dispersion | null => {
-  const available = values.filter((value) => value !== null) as number[]
-  if (available.length === 0) return null
-  if (available.length < values.length) {
-    const missing = runDirs.filter((_, i) => values[i] === null)
-    warnings.push(`measure-usage: ${label} unavailable in ${missing.join(", ")} — dispersion over the remaining runs`)
-  }
-  return dispersion(available)
+  const present = availableValues(runDirs, values, warnings, label)
+  if (present.length === 0) return null
+  return dispersion(present)
+}
+
+// One attribution column over a leg's runs (same availability rule as
+// legMetric): null when no run provides one.
+const legAttribution = (
+  runDirs: string[],
+  values: Array<RunAttribution | null>,
+  warnings: string[],
+  label: string,
+): LegReport["coldStartAttribution"] => {
+  const present = availableValues(runDirs, values, warnings, label)
+  if (present.length === 0) return null
+  const column = (key: keyof RunAttribution) => dispersion(present.map((value) => value[key]))
+  return { system: column("system"), tools: column("tools"), history: column("history") }
 }
 
 const legReport = (
   shape: "fork" | "upstream",
   proxy: boolean,
-  loaded: Array<{ runDir: string; verdicts: string[]; binary: string | null; run: Run }>,
+  loaded: Array<{ runDir: string; verdicts: string[]; binary: string | null; attribution: RunAttribution | null; run: Run }>,
   warnings: string[],
 ): LegReport => {
   const runDirs = loaded.map((entry) => entry.runDir)
@@ -594,7 +631,12 @@ const legReport = (
     verdict,
     verdictMixed: byVerdict.size > 1 || mixed.length > 0,
     metrics,
-    coldStartAttribution: null,
+    coldStartAttribution: legAttribution(
+      runDirs,
+      loaded.map((entry) => entry.attribution),
+      warnings,
+      `coldStartAttribution in leg ${shape}${proxy ? "-proxy" : ""} unavailable for run dirs`,
+    ),
     diagnostics: { cacheCollapses: diagnostics },
   }
 }
@@ -683,6 +725,7 @@ export const campaignReport = async (campaignDir: string): Promise<ComparisonRep
         run,
         verdicts: [...(run.manifest.verdicts ?? [])],
         binary: run.manifest.binary ?? null,
+        attribution: await runAttribution(run),
       }
     }),
   )
