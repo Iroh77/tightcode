@@ -579,11 +579,11 @@ const legReport = (
   // uniform recorded verdict — every run exactly one identical verdict;
   // mixed (≥2 within a run) and flips (disagreement across runs) surface as
   // verdictMixed, unrecordable ([]) as null without mixed.
-  const single = runs.filter((entry) => entry.verdicts.length === 1)
-  const unrecorded = runs.filter((entry) => entry.verdicts.length === 0)
-  const mixed = runs.filter((entry) => entry.verdicts.length >= 2)
-  const distinct = [...new Set(single.map((entry) => entry.verdicts[0] as "binding" | "advisory"))]
-  const verdict = distinct.length === 1 && mixed.length === 0 && unrecorded.length === 0 ? distinct[0] : null
+  const { unrecorded, mixed, byVerdict } = verdictBreakdown(runs)
+  const verdict =
+    byVerdict.size === 1 && mixed.length === 0 && unrecorded.length === 0
+      ? ([...byVerdict.keys()][0] as "binding" | "advisory")
+      : null
   const diagnostics = loaded.flatMap((entry) =>
     cacheCollapseFlags(entry.run.usage).map((flag) => ({ runDir: entry.runDir, ...flag })),
   )
@@ -592,11 +592,28 @@ const legReport = (
     proxy,
     runs,
     verdict,
-    verdictMixed: distinct.length > 1 || mixed.length > 0,
+    verdictMixed: byVerdict.size > 1 || mixed.length > 0,
     metrics,
     coldStartAttribution: null,
     diagnostics: { cacheCollapses: diagnostics },
   }
+}
+
+// The verdict-shape analysis both the leg's verdict column and the fork-side
+// gate read (R13-003): single = exactly one recorded verdict per run,
+// unrecorded = [] runs, mixed = ≥2-verdict runs, byVerdict groups the single
+// runs' run dirs per distinct verdict.
+const verdictBreakdown = (runs: LegReport["runs"]) => {
+  const single = runs.filter((entry) => entry.verdicts.length === 1)
+  const unrecorded = runs.filter((entry) => entry.verdicts.length === 0)
+  const mixed = runs.filter((entry) => entry.verdicts.length >= 2)
+  const byVerdict = new Map<string, string[]>()
+  for (const entry of single) {
+    const dirs = byVerdict.get(entry.verdicts[0]) ?? []
+    dirs.push(entry.runDir)
+    byVerdict.set(entry.verdicts[0], dirs)
+  }
+  return { unrecorded, mixed, byVerdict }
 }
 
 // Fork-side verdict gate (R13-003): comparable only when uniform AND
@@ -605,8 +622,7 @@ const legReport = (
 // surfaced, never silently folded into a delta.
 const forkGate = (forkLeg: LegReport): { comparable: boolean; warnings: string[] } => {
   const warnings: string[] = []
-  const mixed = forkLeg.runs.filter((entry) => entry.verdicts.length >= 2)
-  const unrecorded = forkLeg.runs.filter((entry) => entry.verdicts.length === 0)
+  const { unrecorded, mixed, byVerdict } = verdictBreakdown(forkLeg.runs)
   if (mixed.length > 0)
     warnings.push(
       `measure-usage: fork verdicts mixed in ${mixed.map((entry) => entry.runDir).join(", ")} (${mixed
@@ -617,13 +633,6 @@ const forkGate = (forkLeg: LegReport): { comparable: boolean; warnings: string[]
     warnings.push(
       `measure-usage: no recorded verdict in ${unrecorded.map((entry) => entry.runDir).join(", ")} — mechanism identity unverifiable, comparison refused (R13-003)`,
     )
-  const uniform = forkLeg.runs.filter((entry) => entry.verdicts.length === 1)
-  const byVerdict = new Map<string, string[]>()
-  for (const entry of uniform) {
-    const dirs = byVerdict.get(entry.verdicts[0]) ?? []
-    dirs.push(entry.runDir)
-    byVerdict.set(entry.verdicts[0], dirs)
-  }
   if (byVerdict.size > 1)
     warnings.push(
       `measure-usage: fork verdict flip across runs — ${[...byVerdict]

@@ -582,13 +582,16 @@ describe("campaign aggregation (v2 report)", () => {
     ...input,
   })
 
+  const dirOf = (index: number, shape: "fork" | "upstream", phase = "p1", proxy = false) =>
+    `${String(index).padStart(2, "0")}-${phase}-${shape}${proxy ? "-proxy" : ""}`
+
   const scheduleRun = (index: number, phase: string, shape: "fork" | "upstream", proxy = false) => ({
     index,
     phase,
     shape,
     proxy,
     rep: index % 2,
-    runDir: `${String(index).padStart(2, "0")}-${phase}-${shape}${proxy ? "-proxy" : ""}`,
+    runDir: dirOf(index, shape, phase, proxy),
     status: "done",
   })
 
@@ -605,9 +608,6 @@ describe("campaign aggregation (v2 report)", () => {
     await Bun.write(path.join(dir, "campaign.json"), JSON.stringify(document))
     for (const entry of runDirs) await writeRun(path.join(dir, entry.dir), entry)
   }
-
-  const dirOf = (index: number, shape: "fork" | "upstream", phase = "p1", proxy = false) =>
-    `${String(index).padStart(2, "0")}-${phase}-${shape}${proxy ? "-proxy" : ""}`
 
   // Hand-computed fixture legs (62 chars per capture — the ticket-28 fixture):
   // fork coldStart [10, 30] → median 20; sessionInput [16, 36] → median 26
