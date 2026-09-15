@@ -104,8 +104,6 @@ const mcp = Layer.succeed(
   }),
 )
 
-const runtimeFlags = RuntimeFlags.layer({ experimentalEventSystem: true })
-
 const testLLMServerNode = LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })
 
 const promptRoot = LayerNode.group([
@@ -152,7 +150,9 @@ const promptRoot = LayerNode.group([
 // violating tool call (the server answers probes off the books), so the
 // advisory session injects the verdict through the probe seam instead. The
 // binding session keeps the real cascade: probe request → no tool call →
-// conservative binding.
+// conservative binding. The wrapper axis is killed off so the round-1
+// schema-eager binding bytes stay asserted end-to-end (R12-012: flag set ⇒
+// round-1 binding); the wrapper path is covered by ticket 21's integration test.
 const forcedVerdictNode = (probe: BindingVerdict.Probe) =>
   LayerNode.make({
     service: BindingVerdict.Service,
@@ -160,20 +160,20 @@ const forcedVerdictNode = (probe: BindingVerdict.Probe) =>
     deps: [FSUtil.node, Global.node, ProviderSvc.node],
   })
 
-const makeEnv = (probe?: BindingVerdict.Probe) => {
+const makeEnv = (probe?: BindingVerdict.Probe, flags?: Partial<RuntimeFlags.Info>) => {
   const root = LayerNode.group([promptRoot, testLLMServerNode])
   const replacements: LayerNode.Replacement[] = [
     [SessionSummary.node, summary],
     [LSP.node, lsp],
     [MCP.node, mcp],
-    [RuntimeFlags.node, runtimeFlags],
+    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true, ...flags })],
   ]
   if (probe) replacements.push([BindingVerdict.node, forcedVerdictNode(probe)])
   return LayerNode.compile(root, replacements)
 }
 
 const advisory = testEffect(makeEnv(() => Effect.succeed("advisory")))
-const binding = testEffect(makeEnv())
+const binding = testEffect(makeEnv(undefined, { disableToolWrapper: true }))
 
 const cfg = {
   provider: {

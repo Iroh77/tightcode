@@ -34,12 +34,14 @@ export const delivered = (name: string, messages: SessionV1.WithParts[]): boolea
     }),
   )
 
-const fullServe = (entry: FrozenToolEntry, mode: Verdict) => {
+// Three-way serve off the frozen (mode, wrapper) pair (R12-012): advisory and
+// binding+wrapper serve the full schema (on wrapper sessions no listing entry
+// carries the schema — this is its only channel, R12-005); binding without the
+// wrapper serves the description only, the listing entry already carries the
+// full schema (R12-010).
+const fullServe = (entry: FrozenToolEntry, mode: Verdict, wrapper: boolean) => {
   const head = [`### ${entry.name}`, "", entry.fullDescription]
-  // Advisory: the listing entry carries only the placeholder schema, so the
-  // full schema reaches the model here (R12-005). Binding: the entry already
-  // carries the full schema (R12-010), only the description was deferred.
-  return mode === "advisory"
+  return mode === "advisory" || wrapper
     ? [...head, "", "Input schema:", JSON.stringify(entry.jsonSchema, null, 2)].join("\n")
     : [...head, "", "The full input schema is already registered in the tool listing."].join("\n")
 }
@@ -64,8 +66,10 @@ export const LoadTool = Tool.define<typeof Parameters, Metadata, PromptBase.Serv
           // A missing mode with entries present cannot happen (the mode is
           // written with the first tool batch); advisory is the conservative
           // fallback — the schema must reach the model when it is not already
-          // in the listing (R12-005).
+          // in the listing (R12-005). A missing wrapper defaults false —
+          // round-1 semantics (the flag is written with the first batch).
           const mode = base.mode ?? "advisory"
+          const wrapper = base.wrapper ?? false
           const loadable = base.entries.filter((entry) => entry.kind === "deferred").map((entry) => entry.name)
           const sections: string[] = []
           const served: string[] = []
@@ -89,7 +93,7 @@ export const LoadTool = Tool.define<typeof Parameters, Metadata, PromptBase.Serv
               sections.push(`${name}: already loaded.`)
               continue
             }
-            sections.push(fullServe(entry, mode))
+            sections.push(fullServe(entry, mode, wrapper))
             served.push(name)
           }
           return {

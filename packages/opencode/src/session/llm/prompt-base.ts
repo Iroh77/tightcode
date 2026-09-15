@@ -67,15 +67,19 @@ export interface Interface {
     provider: Provider.Info
     seeds: ToolSeed[]
     mode: Verdict
-  }) => Effect.Effect<{ entries: FrozenToolEntry[]; appended: string[]; mode: Verdict }, DuplicateToolEntryError>
+    wrapper: boolean
+  }) => Effect.Effect<
+    { entries: FrozenToolEntry[]; appended: string[]; mode: Verdict; wrapper: boolean },
+    DuplicateToolEntryError
+  >
   // Read view over the frozen base (load_tool path): the entries plus the
-  // frozen mode. An unknown key yields an empty view — callers render their
-  // own error lines from it.
+  // frozen (mode, wrapper) policy pair. An unknown key yields an empty view —
+  // callers render their own error lines from it.
   readonly entries: (input: {
     sessionID: string
     model: Provider.Model
     provider: Provider.Info
-  }) => Effect.Effect<{ entries: FrozenToolEntry[]; mode: Verdict | undefined }>
+  }) => Effect.Effect<{ entries: FrozenToolEntry[]; mode: Verdict | undefined; wrapper: boolean | undefined }>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PromptBase") {}
@@ -86,6 +90,9 @@ type PromptBaseState = {
   // The R12-010 verdict frozen with the first tool write: a mid-session
   // BindingVerdict.observe flip must never re-render frozen entries (R12-007).
   mode?: Verdict
+  // The R12-012 wrapper axis frozen next to the mode: the pair (mode, wrapper)
+  // is exactly what decided the written listing shapes.
+  wrapper?: boolean
 }
 
 const emptyState = (): PromptBaseState => ({ systemBlocks: [], toolEntries: new Map() })
@@ -132,11 +139,15 @@ const layer = Layer.effect(
       provider: Provider.Info
       seeds: ToolSeed[]
       mode: Verdict
+      wrapper: boolean
     }) {
       const map = yield* InstanceState.get(state)
       const key = stateKey(input)
       const current = map.get(key) ?? emptyState()
       const mode = current.mode ?? input.mode
+      // Same first-write rule as the mode: the frozen pair (mode, wrapper) is
+      // what decided the written shapes; a mid-session change never re-reads.
+      const wrapper = current.wrapper ?? input.wrapper
       const appended: ToolSeed[] = []
       for (const seedItem of input.seeds) {
         if (current.toolEntries.has(seedItem.name)) continue
@@ -148,8 +159,8 @@ const layer = Layer.effect(
         entries.set(seedItem.name, seedItem)
         return entries
       }, new Map(current.toolEntries))
-      if (appended.length > 0) map.set(key, { ...current, toolEntries, mode })
-      return { entries: [...toolEntries.values()], appended: appended.map((seedItem) => seedItem.name), mode }
+      if (appended.length > 0) map.set(key, { ...current, toolEntries, mode, wrapper })
+      return { entries: [...toolEntries.values()], appended: appended.map((seedItem) => seedItem.name), mode, wrapper }
     })
 
     const entries = Effect.fn("PromptBase.entries")(function* (input: {
@@ -160,8 +171,8 @@ const layer = Layer.effect(
       const map = yield* InstanceState.get(state)
       const current = map.get(stateKey(input))
       return current
-        ? { entries: [...current.toolEntries.values()], mode: current.mode }
-        : { entries: [] as FrozenToolEntry[], mode: undefined }
+        ? { entries: [...current.toolEntries.values()], mode: current.mode, wrapper: current.wrapper }
+        : { entries: [] as FrozenToolEntry[], mode: undefined, wrapper: undefined }
     })
 
     return Service.of({ reconcileSystem, reconcileTools, entries })

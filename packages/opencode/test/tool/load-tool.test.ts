@@ -69,7 +69,7 @@ const ctx = (messages: SessionV1.WithParts[] = []): Tool.Context => ({
 })
 
 // Freezes a base for the test session: eager bash, deferred glob and grep.
-const freeze = (mode: "advisory" | "binding" = "advisory") =>
+const freeze = (mode: "advisory" | "binding" = "advisory", wrapper = false) =>
   Effect.gen(function* () {
     const promptBase = yield* PromptBase.Service
     return yield* promptBase.reconcileTools({
@@ -77,6 +77,7 @@ const freeze = (mode: "advisory" | "binding" = "advisory") =>
       model,
       provider: providerInfo,
       mode,
+      wrapper,
       seeds: [
         {
           name: "bash",
@@ -223,6 +224,23 @@ describe("tool.load-tool", () => {
       expect(result.output).toContain("glob full description")
       expect(result.output).not.toContain("Input schema:")
       expect(result.output).toContain("already registered in the tool listing")
+      expect(result.metadata.load_tool).toEqual({ tools: ["glob"] })
+    }),
+  )
+
+  it.instance("on binding+wrapper sessions serves the description and schema — no listing entry carries it (R12-012)", () =>
+    Effect.gen(function* () {
+      yield* freeze("binding", true)
+      const info = yield* LoadTool
+      const tool = yield* info.init()
+
+      const result = yield* tool.execute({ tools: ["glob"] }, ctx())
+
+      expect(result.output).toContain("### glob")
+      expect(result.output).toContain("glob full description")
+      expect(result.output).toContain("Input schema:")
+      expect(result.output).toContain('"pattern"')
+      expect(result.output).not.toContain("already registered")
       expect(result.metadata.load_tool).toEqual({ tools: ["glob"] })
     }),
   )

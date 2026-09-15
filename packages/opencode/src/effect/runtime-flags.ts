@@ -18,6 +18,10 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   pure: bool("OPENCODE_PURE"),
   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),
   disableLazyTools: bool("OPENCODE_DISABLE_LAZY_TOOLS"),
+  // Wrapper axis (R12-012): set ⇒ binding sessions revert to schema-eager
+  // round-1 listing (R12-010 without the wrapper). OPENCODE_DISABLE_LAZY_TOOLS
+  // dominates (whole mechanism off, upstream-identical).
+  disableToolWrapper: bool("OPENCODE_DISABLE_TOOL_WRAPPER"),
   disableStaticSlimming: bool("OPENCODE_DISABLE_STATIC_SLIMMING"),
   // Capture is opt-in observability (R10-001), not an optimized axis: its
   // default state (off) IS the upstream-identical one, so no disable flag

@@ -63,7 +63,7 @@ describe("session.prompt-base", () => {
     it.instance("freezes tool entries on first write and absorbs per-turn recomputation", () =>
       Effect.gen(function* () {
         const promptBase = yield* PromptBase.Service
-        const base = { sessionID: "ses_tools_freeze", model: model(), provider: provider(), mode: "advisory" as const }
+        const base = { sessionID: "ses_tools_freeze", model: model(), provider: provider(), mode: "advisory" as const, wrapper: false }
         const first = yield* promptBase.reconcileTools({
           ...base,
           seeds: [seed("bash", "eager"), seed("glob")],
@@ -86,7 +86,7 @@ describe("session.prompt-base", () => {
     it.instance("appends new names as one batch in insertion order, existing entries immutable", () =>
       Effect.gen(function* () {
         const promptBase = yield* PromptBase.Service
-        const base = { sessionID: "ses_tools_batch", model: model(), provider: provider(), mode: "advisory" as const }
+        const base = { sessionID: "ses_tools_batch", model: model(), provider: provider(), mode: "advisory" as const, wrapper: false }
         const first = yield* promptBase.reconcileTools({ ...base, seeds: [seed("bash", "eager"), seed("glob")] })
 
         const connect = yield* promptBase.reconcileTools({
@@ -119,7 +119,7 @@ describe("session.prompt-base", () => {
     it.instance("agent switch never removes frozen entries or re-evaluates permissibility", () =>
       Effect.gen(function* () {
         const promptBase = yield* PromptBase.Service
-        const base = { sessionID: "ses_tools_agent", model: model(), provider: provider(), mode: "advisory" as const }
+        const base = { sessionID: "ses_tools_agent", model: model(), provider: provider(), mode: "advisory" as const, wrapper: false }
         const first = yield* promptBase.reconcileTools({
           ...base,
           seeds: [seed("bash", "eager"), seed("glob"), seed("task")],
@@ -137,7 +137,7 @@ describe("session.prompt-base", () => {
     it.instance("freezes the mode at first write; a later verdict change never re-renders entries", () =>
       Effect.gen(function* () {
         const promptBase = yield* PromptBase.Service
-        const base = { sessionID: "ses_tools_mode", model: model(), provider: provider(), mode: "advisory" as const }
+        const base = { sessionID: "ses_tools_mode", model: model(), provider: provider(), mode: "advisory" as const, wrapper: false }
         const first = yield* promptBase.reconcileTools({ ...base, seeds: [seed("glob")] })
         expect(first.mode).toBe("advisory")
 
@@ -146,10 +146,11 @@ describe("session.prompt-base", () => {
         const flipped = yield* promptBase.reconcileTools({
           ...base,
           mode: "binding" as const,
+          wrapper: false,
           seeds: [seed("glob", "deferred", "CHANGED")],
         })
         expect(flipped.mode).toBe("advisory")
-        const rendered = ToolListing.render(flipped.entries, flipped.mode)
+        const rendered = ToolListing.render(flipped.entries, flipped.mode, flipped.wrapper ?? false)
         expect(rendered[0].jsonSchema).toEqual({ type: "object", properties: {} })
       }),
     )
@@ -163,11 +164,62 @@ describe("session.prompt-base", () => {
             model: model(),
             provider: provider(),
             mode: "advisory" as const,
+            wrapper: false,
             seeds: [seed("glob"), seed("glob")],
           }),
         )
         expect(error._tag).toBe("DuplicateToolEntryError")
         expect(error.name).toBe("glob")
+      }),
+    )
+
+    it.instance("freezes the wrapper flag at first write next to the mode; a later change never mutates it", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const base = { sessionID: "ses_tools_wrapper", model: model(), provider: provider() }
+        const first = yield* promptBase.reconcileTools({
+          ...base,
+          mode: "binding" as const,
+          wrapper: true,
+          seeds: [seed("bash", "eager"), seed("glob")],
+        })
+        expect(first.mode).toBe("binding")
+        expect(first.wrapper).toBe(true)
+
+        // A mid-session flag or verdict change (kill-switch flip, observe
+        // flip) cannot mutate the written shapes: the frozen pair decides.
+        const flipped = yield* promptBase.reconcileTools({
+          ...base,
+          mode: "advisory" as const,
+          wrapper: false,
+          seeds: [seed("bash", "eager"), seed("glob", "deferred", "CHANGED")],
+        })
+        expect(flipped.mode).toBe("binding")
+        expect(flipped.wrapper).toBe(true)
+
+        // The frozen pair is exactly what the listing policy reads: the
+        // deferred entry stays omitted on the frozen wrapper view.
+        const rendered = ToolListing.render(flipped.entries, flipped.mode, flipped.wrapper)
+        expect(rendered.map((entry) => entry.name)).toEqual(["bash"])
+      }),
+    )
+
+    it.instance("round-1 sessions freeze wrapper=false and render schema-eager binding entries", () =>
+      Effect.gen(function* () {
+        const promptBase = yield* PromptBase.Service
+        const base = { sessionID: "ses_tools_wrapper_off", model: model(), provider: provider() }
+        const first = yield* promptBase.reconcileTools({
+          ...base,
+          mode: "binding" as const,
+          wrapper: false,
+          seeds: [seed("glob")],
+        })
+        expect(first.wrapper).toBe(false)
+
+        const view = yield* promptBase.entries({ ...base })
+        expect(view.wrapper).toBe(false)
+        const rendered = ToolListing.render(view.entries, view.mode!, view.wrapper!)
+        expect(rendered[0].jsonSchema).toEqual(view.entries[0].jsonSchema)
       }),
     )
   })
@@ -176,11 +228,12 @@ describe("session.prompt-base", () => {
     it.instance("reads the frozen entries and frozen mode for the session key", () =>
       Effect.gen(function* () {
         const promptBase = yield* PromptBase.Service
-        const base = { sessionID: "ses_entries", model: model(), provider: provider(), mode: "advisory" as const }
+        const base = { sessionID: "ses_entries", model: model(), provider: provider(), mode: "advisory" as const, wrapper: false }
         yield* promptBase.reconcileTools({ ...base, seeds: [seed("bash", "eager"), seed("glob")] })
 
         const view = yield* promptBase.entries({ sessionID: "ses_entries", model: model(), provider: provider() })
         expect(view.mode).toBe("advisory")
+        expect(view.wrapper).toBe(false)
         expect(view.entries.map((entry) => entry.name)).toEqual(["bash", "glob"])
 
         // load_tool reads the same base the request froze; another session
@@ -192,6 +245,7 @@ describe("session.prompt-base", () => {
         })
         expect(other.entries).toEqual([])
         expect(other.mode).toBeUndefined()
+        expect(other.wrapper).toBeUndefined()
       }),
     )
   })

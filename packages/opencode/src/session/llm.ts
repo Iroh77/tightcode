@@ -49,6 +49,7 @@ export type StreamInput = {
   tools: Record<string, Tool>
   toolSeeds?: ToolSeed[]
   toolVerdict?: Verdict
+  toolWrapper?: boolean
   retries?: number
   toolChoice?: "auto" | "required" | "none"
 }

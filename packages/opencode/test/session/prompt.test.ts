@@ -164,7 +164,11 @@ const blockingProcessor = Layer.succeed(
   }),
 )
 
-const runtimeFlags = RuntimeFlags.layer({ experimentalEventSystem: true })
+// The wrapper axis (R12-012) is killed off here: these upstream-authored tests
+// script direct calls to deferred tools (glob, task) and assert upstream
+// behavior — the flag keeps their sessions upstream-identical (R00-013). The
+// wrapper path is covered by the fork's own lazy-tool tests.
+const runtimeFlags = RuntimeFlags.layer({ experimentalEventSystem: true, disableToolWrapper: true })
 
 const testLLMServerNode = LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })
 

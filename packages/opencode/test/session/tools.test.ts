@@ -13,6 +13,7 @@ import { MessageID, PartID, SessionID } from "@/session/schema"
 import { SessionProcessor } from "@/session/processor"
 import { SessionTools } from "@/session/tools"
 import { Tool } from "@/tool/tool"
+import { DEFERRED_TOOL_DESCRIPTION, DEFERRED_TOOL_SCHEMA } from "@/tool/deferred_tool"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
@@ -269,6 +270,13 @@ describe("session.tools lazy listing (ticket 05)", () => {
   const itBinding = testEffect(
     Layer.mergeAll(baseLayer({ registry: globRegistry }), verdictStub("binding"), providerStub),
   )
+  const itBindingNoWrapper = testEffect(
+    Layer.mergeAll(
+      baseLayer({ flags: { disableToolWrapper: true }, registry: globRegistry }),
+      verdictStub("binding"),
+      providerStub,
+    ),
+  )
   const itAdvisory = testEffect(
     Layer.mergeAll(baseLayer({ registry: globRegistry }), verdictStub("advisory"), providerStub),
   )
@@ -280,19 +288,41 @@ describe("session.tools lazy listing (ticket 05)", () => {
     ),
   )
 
-  itBinding.effect("resolves the verdict at resolve time and shapes the per-turn listing view with it (binding)", () =>
+  itBinding.effect("binding + wrapper: the meta-tool seed joins eager, deferred entries keep full-fact shapes", () =>
     Effect.gen(function* () {
       calls.length = 0
       const resolved = yield* resolveGlob
       // resolved before the session's first provider request, scoped to the (provider, model) tuple
       expect(calls).toEqual([{ model, provider: providerInfo }])
       expect(resolved.verdict).toBe("binding")
-      // binding: the per-turn AITool record carries the full schema in place of the placeholder
+      expect(resolved.wrapper).toBe(true)
+      // the meta-tool seed is pushed before shape and classified eager; the
+      // closed definition rides the seed verbatim
+      const meta = resolved.seeds.find((seed) => seed.name === "deferred_tool")
+      expect(meta?.kind).toBe("eager")
+      expect(meta?.jsonSchema).toEqual(DEFERRED_TOOL_SCHEMA)
+      expect(meta?.fullDescription).toBe(DEFERRED_TOOL_DESCRIPTION)
+      // glob's listing view is omitted on wrapper sessions, so the per-turn
+      // AITool keeps its full-fact shape — the payload omission happens at
+      // impose, never here (the closures are the dispatch targets)
+      expect(resolved.tools.glob.inputSchema).toEqual(jsonSchema(globSchema))
+      expect(resolved.tools.glob.description).toBe(long)
+      // seeds stay full facts (mode-independent first-write source)
+      expect(resolved.seeds.find((seed) => seed.name === "glob")?.fullDescription).toBe(long)
+      expect(resolved.seeds.find((seed) => seed.name === "glob")?.jsonSchema).toEqual(globSchema)
+    }),
+  )
+
+  itBindingNoWrapper.effect("binding + wrapper kill-switch: round-1 schema-eager listing, no meta seed", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveGlob
+      expect(resolved.verdict).toBe("binding")
+      expect(resolved.wrapper).toBe(false)
+      expect(resolved.seeds.some((seed) => seed.name === "deferred_tool")).toBe(false)
+      // round-1 binding: the per-turn AITool carries the full schema with the
+      // truncated description (R12-010 amendment 1)
       expect(resolved.tools.glob.inputSchema).toEqual(jsonSchema(globSchema))
       expect(resolved.tools.glob.description).toBe(long.slice(0, long.lastIndexOf(" ")) + "...")
-      // seeds stay full facts (mode-independent first-write source)
-      expect(resolved.seeds[0].fullDescription).toBe(long)
-      expect(resolved.seeds[0].jsonSchema).toEqual(globSchema)
     }),
   )
 
@@ -301,6 +331,8 @@ describe("session.tools lazy listing (ticket 05)", () => {
       calls.length = 0
       const resolved = yield* resolveGlob
       expect(resolved.verdict).toBe("advisory")
+      expect(resolved.wrapper).toBe(false)
+      expect(resolved.seeds.some((seed) => seed.name === "deferred_tool")).toBe(false)
       expect(resolved.tools.glob.inputSchema).toEqual(jsonSchema({ type: "object", properties: {} }))
     }),
   )
@@ -309,6 +341,7 @@ describe("session.tools lazy listing (ticket 05)", () => {
     Effect.gen(function* () {
       const resolved = yield* resolveGlob
       expect(resolved.verdict).toBeUndefined()
+      expect(resolved.wrapper).toBeUndefined()
       expect(resolved.seeds).toEqual([])
       expect(resolved.tools.glob.description).toBe(long)
       expect(resolved.tools.glob.inputSchema).toEqual(jsonSchema(globSchema))

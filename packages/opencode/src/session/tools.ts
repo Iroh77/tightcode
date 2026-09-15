@@ -7,6 +7,7 @@ import { MCP } from "@/mcp"
 import { McpCatalog } from "@/mcp/catalog"
 import { Permission } from "@/permission"
 import { Tool } from "@/tool/tool"
+import { DEFERRED_TOOL_DESCRIPTION, DEFERRED_TOOL_SCHEMA } from "@/tool/deferred_tool"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
@@ -522,7 +523,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   // Kill-switch (SC-3): upstream per-turn shapes pass through, no verdict is
   // resolved, the freeze never sees seeds (R00-013 — flag set is
-  // upstream-identical).
+  // upstream-identical). `wrapper` stays absent on this path.
   if (flags.disableLazyTools) return { tools, seeds: [], verdict: undefined }
 
   const bindingVerdict = yield* BindingVerdict.Service
@@ -532,11 +533,28 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   // the prompt base is frozen against; BindingVerdict memoizes per key.
   const providerInfo = yield* providerService.getProvider(input.model.providerID)
   const verdict = yield* bindingVerdict.resolve({ model: input.model, provider: providerInfo })
+  // R12-012: the wrapper activates only on binding sessions without its
+  // kill-switch (disableLazyTools already early-returned above). It is env
+  // —stable per session: the resolved pair (verdict, wrapper) is what the
+  // listing, the payload and load_tool's serve all read.
+  const wrapperActive = verdict === "binding" && !flags.disableToolWrapper
+  // The meta-tool seed joins the universe before shape, so the listing and the
+  // frozen base see it as an eager entry (decision tool-lazy-loading-04 §1/§9:
+  // unconditionally eager, even with zero deferred seeds at first write — a
+  // late MCP connect would otherwise open a catalog with no reachable meta
+  // tool). Its AITool is constructed at the confluence below.
+  if (wrapperActive)
+    universe.push({
+      name: "deferred_tool",
+      description: DEFERRED_TOOL_DESCRIPTION,
+      jsonSchema: DEFERRED_TOOL_SCHEMA,
+      source: "builtin",
+    })
   const seeds = ToolListing.shape({
     universe,
     ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
   })
-  const listing = new Map(ToolListing.render(seeds, verdict).map((entry) => [entry.name, entry]))
+  const listing = new Map(ToolListing.render(seeds, verdict, wrapperActive).map((entry) => [entry.name, entry]))
   // R12-006: every deferred entry's execute is wrapped once here — the single
   // confluence of the built-in, resource and MCP closures — so the fallback
   // covers all three families uniformly (R12-009) and processor.ts stays
@@ -572,7 +590,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       ]
     }),
   )
-  return { tools: shaped, seeds, verdict }
+  // Unlisted deferred entries keep their full-fact AITool shapes here — the
+  // payload omission happens at impose (request.ts), never by mutating this
+  // record: the closures are the dispatch targets (decision tool-lazy-loading-04).
+  return { tools: shaped, seeds, verdict, wrapper: wrapperActive }
 })
 
 function toRecord(value: unknown) {

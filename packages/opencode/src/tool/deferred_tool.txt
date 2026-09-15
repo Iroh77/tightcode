@@ -1,0 +1,12 @@
+Execute a deferred tool that is not listed in the tool listing.
+
+Deferred tools are discovered through the <deferred_tools> catalog blocks in the
+system prompt, which list each tool's name and a short description. To execute
+one, pass its exact catalog name as `name` and its arguments object serialized
+to a JSON string as `args`.
+
+Example: {"name": "glob", "args": "{\"pattern\": \"src/**/*.ts\"}"}
+
+Call load_tool with a tool's name to receive its full description and input
+schema. Tools that do appear in the tool listing must be called directly —
+this tool is only for deferred ones.

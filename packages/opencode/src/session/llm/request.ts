@@ -34,6 +34,9 @@ type PrepareInput = {
   readonly tools: Record<string, Tool>
   readonly toolSeeds?: ToolSeed[]
   readonly toolVerdict?: Verdict
+  // The R12-012 wrapper axis resolved at SessionTools.resolve; frozen next to
+  // the mode at the first write. Missing = round-1 semantics (false).
+  readonly toolWrapper?: boolean
   readonly provider: Provider.Info
   readonly auth: Auth.Info | undefined
   readonly plugin: Plugin.Interface
@@ -78,21 +81,31 @@ const unavailableExecute = (name: string) => async (): Promise<{ output: string;
 }
 
 // Impose (detailed design [c]): the frozen tool base is the authoritative
-// listing shape at the payload. Every frozen name is projected with its frozen
-// description/inputSchema, pairing execute closures from the per-turn record
-// while they exist; names outside the base (StructuredOutput, _noop) pass
-// through untouched. The permission/user.tools filter downstream stays
-// permissive-relevant for the current agent (R12-001 dominates after impose).
-const impose = (tools: Record<string, Tool>, frozen: { entries: FrozenToolEntry[]; mode: Verdict }): Record<string, Tool> => {
+// listing shape at the payload. Every frozen name with a render view is
+// projected with its frozen description/inputSchema, pairing execute closures
+// from the per-turn record while they exist. The second loop passes through
+// only names OUTSIDE the frozen base (StructuredOutput, _noop — never frozen):
+// round-1 behavior is unchanged (every frozen name had a view), and on wrapper
+// sessions the frozen deferred names — which the render view omits — are
+// dropped from the payload instead of leaking their full per-turn record
+// shapes (R12-012: the omission IS the mechanism; R12-007's non-removal
+// governs the frozen state, not the listing view). The permission/user.tools
+// filter downstream stays permissive-relevant for the current agent (R12-001
+// dominates after impose).
+const impose = (
+  tools: Record<string, Tool>,
+  frozen: { entries: FrozenToolEntry[]; mode: Verdict; wrapper: boolean },
+): Record<string, Tool> => {
   const result: Record<string, Tool> = {}
-  for (const entry of ToolListing.render(frozen.entries, frozen.mode)) {
+  for (const entry of ToolListing.render(frozen.entries, frozen.mode, frozen.wrapper)) {
     const live = tools[entry.name]
     result[entry.name] = live
       ? { ...live, description: entry.description, inputSchema: jsonSchema(entry.jsonSchema) }
       : aiTool({ description: entry.description, inputSchema: jsonSchema(entry.jsonSchema), execute: unavailableExecute(entry.name) })
   }
+  const frozenNames = new Set(frozen.entries.map((entry) => entry.name))
   for (const [name, tool] of Object.entries(tools)) {
-    if (name in result) continue
+    if (frozenNames.has(name)) continue
     result[name] = tool
   }
   return result
@@ -126,6 +139,9 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         // flip never re-renders written entries). A missing verdict is an
         // unresolvable one — conservative binding (R12-010).
         mode: input.toolVerdict ?? "binding",
+        // The R12-012 wrapper axis rides beside it; missing = round-1
+        // schema-eager binding (the kill-switch path).
+        wrapper: input.toolWrapper ?? false,
       })
   const system = [
     [

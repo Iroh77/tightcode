@@ -33,6 +33,7 @@ describe("session.tool-listing", () => {
           def("bash", "Runs a shell command"),
           def("read", "Reads a file"),
           def("load_tool", "Loads a deferred tool"),
+          def("deferred_tool", "Execute a deferred tool"),
           def("glob", long),
           def("firecrawl_scrape", "Scrapes a page", "mcp", "firecrawl"),
           def("list_mcp_resources", "Lists resources", "resource"),
@@ -44,6 +45,9 @@ describe("session.tool-listing", () => {
       expect(byName.get("bash")?.kind).toBe("eager")
       expect(byName.get("read")?.kind).toBe("eager")
       expect(byName.get("load_tool")?.kind).toBe("eager")
+      // the wrapper meta-tool is eager — it only ever enters the universe on
+      // binding+wrapper sessions, gated at the resolve confluence
+      expect(byName.get("deferred_tool")?.kind).toBe("eager")
       expect(byName.get("glob")?.kind).toBe("deferred")
       expect(byName.get("firecrawl_scrape")?.kind).toBe("deferred")
       expect(byName.get("list_mcp_resources")?.kind).toBe("deferred")
@@ -59,6 +63,7 @@ describe("session.tool-listing", () => {
         "bash",
         "read",
         "load_tool",
+        "deferred_tool",
         "glob",
         "firecrawl_scrape",
         "list_mcp_resources",
@@ -121,6 +126,7 @@ describe("session.tool-listing", () => {
           ruleset: [],
         }),
         "advisory",
+        false,
       )
       expect(view).toEqual([
         { name: "bash", description: "Runs a shell command", jsonSchema: schema("bash") },
@@ -145,6 +151,7 @@ describe("session.tool-listing", () => {
           ruleset: [],
         }),
         "advisory",
+        false,
       )
       expect(view[0].description).toEqual(bound)
       expect(view[1].description).toEqual("short description")
@@ -165,6 +172,7 @@ describe("session.tool-listing", () => {
           ruleset: [],
         }),
         "advisory",
+        false,
       )
       expect(view.map((entry) => entry.name)).toEqual(["firecrawl_scrape", "firecrawl_search", "notion_search", "bash"])
       expect(view[0].description).toBe("firecrawl: Scrapes")
@@ -180,7 +188,7 @@ describe("session.tool-listing", () => {
         ruleset: [],
       })
       // frozen insertion order: firecrawl_search written first, api_call appended later
-      const view = ToolListing.render([...frozen, ...appended], "advisory")
+      const view = ToolListing.render([...frozen, ...appended], "advisory", false)
       expect(view[0].description).toBe("firecrawl: Searches")
       expect(view[1].description).toBe("Calls the API")
     })
@@ -196,6 +204,7 @@ describe("session.tool-listing", () => {
           ruleset: [],
         }),
         "advisory",
+        false,
       )
       expect(view[0].description).toBe("srv: ")
       expect(view[1].description).toBe("")
@@ -212,7 +221,7 @@ describe("session.tool-listing", () => {
       ]
       const seeds = ToolListing.shape({ universe, ruleset: [] })
       expect(Object.keys(seeds[0]).toSorted()).toEqual(["fullDescription", "jsonSchema", "kind", "name"])
-      const view = ToolListing.render(seeds, "advisory")
+      const view = ToolListing.render(seeds, "advisory", false)
       for (const entry of view) {
         expect(Object.keys(entry).toSorted()).toEqual(["description", "jsonSchema", "name"])
         expect(entry.jsonSchema).toEqual({ type: "object", properties: {} })
@@ -234,7 +243,7 @@ describe("session.tool-listing", () => {
     })
 
     test("binding: every deferred entry carries its full schema; the description stays truncated", () => {
-      const view = ToolListing.render(seeds, "binding")
+      const view = ToolListing.render(seeds, "binding", false)
       expect(view[0]).toEqual({ name: "bash", description: "Runs a shell command", jsonSchema: schema("bash") })
       expect(view[1].name).toBe("glob")
       // schema-eager, description-deferred (R12-010 amendment 1)
@@ -243,7 +252,7 @@ describe("session.tool-listing", () => {
     })
 
     test("advisory: the same entries carry the constant placeholder instead", () => {
-      const view = ToolListing.render(seeds, "advisory")
+      const view = ToolListing.render(seeds, "advisory", false)
       expect(view[1].jsonSchema).toEqual(PLACEHOLDER)
       expect(view[2].jsonSchema).toEqual(PLACEHOLDER)
       // the mode changes which schema value is written, never the entry shape
@@ -251,11 +260,71 @@ describe("session.tool-listing", () => {
     })
 
     test("prefix-once and eager fullness are mode-independent", () => {
-      const binding = ToolListing.render(seeds, "binding")
-      const advisory = ToolListing.render(seeds, "advisory")
+      const binding = ToolListing.render(seeds, "binding", false)
+      const advisory = ToolListing.render(seeds, "advisory", false)
       expect(binding.map((entry) => entry.description)).toEqual(advisory.map((entry) => entry.description))
       expect(binding[2].description).toBe("firecrawl: Scrapes a page")
       expect(binding[0].jsonSchema).toEqual(advisory[0].jsonSchema)
+    })
+  })
+
+  describe("render wrapper policy (R12-012, ticket 17)", () => {
+    const long = "search the workspace for " + "x".repeat(90)
+
+    const seeds = ToolListing.shape({
+      universe: [
+        def("bash", "Runs a shell command"),
+        def("glob", long),
+        def("firecrawl_scrape", "Scrapes a page", "mcp", "firecrawl"),
+        def("firecrawl_search", "Searches the web", "mcp", "firecrawl"),
+      ],
+      ruleset: [],
+    })
+
+    test("binding + wrapper: deferred entries produce no listing entry; eager entries stay", () => {
+      const view = ToolListing.render(seeds, "binding", true)
+      expect(view.map((entry) => entry.name)).toEqual(["bash"])
+      expect(view[0]).toEqual({ name: "bash", description: "Runs a shell command", jsonSchema: schema("bash") })
+    })
+
+    test("the eager meta-tool seed rides the wrapper listing with full facts", () => {
+      const withMeta = ToolListing.shape({
+        universe: [def("glob", long), def("deferred_tool", "Execute a deferred tool")],
+        ruleset: [],
+      })
+      const view = ToolListing.render(withMeta, "binding", true)
+      expect(view.map((entry) => entry.name)).toEqual(["deferred_tool"])
+      expect(view[0].description).toBe("Execute a deferred tool")
+      expect(view[0].jsonSchema).toEqual(schema("deferred_tool"))
+    })
+
+    test("kill-switch (wrapper=false): round-1 binding bytes", () => {
+      const view = ToolListing.render(seeds, "binding", false)
+      expect(view.map((entry) => entry.name)).toEqual(["bash", "glob", "firecrawl_scrape", "firecrawl_search"])
+      expect(view[1].jsonSchema).toEqual(schema("glob"))
+      expect(view[1].description).toBe(long.slice(0, long.lastIndexOf(" ")) + "...")
+      expect(view[2].description).toBe("firecrawl: Scrapes a page")
+    })
+
+    test("advisory golden: byte-identical to the round-1 render regardless of the wrapper axis", () => {
+      // the pair advisory+wrapper cannot occur (wrapperActive requires
+      // binding); defensively the advisory shape wins either way
+      expect(ToolListing.render(seeds, "advisory", true)).toEqual(ToolListing.render(seeds, "advisory", false))
+      expect(ToolListing.render(seeds, "advisory", false)).toEqual([
+        { name: "bash", description: "Runs a shell command", jsonSchema: schema("bash") },
+        { name: "glob", description: long.slice(0, long.lastIndexOf(" ")) + "...", jsonSchema: PLACEHOLDER },
+        { name: "firecrawl_scrape", description: "firecrawl: Scrapes a page", jsonSchema: PLACEHOLDER },
+        { name: "firecrawl_search", description: "Searches the web", jsonSchema: PLACEHOLDER },
+      ])
+    })
+
+    test("prefix-once ownership is computed over the full frozen list, unaffected by omission", () => {
+      // the omission render never moves an owner: the same frozen list rendered
+      // without the wrapper still carries the prefix on the first-written entry
+      expect(ToolListing.render(seeds, "binding", true).map((entry) => entry.name)).toEqual(["bash"])
+      const restored = ToolListing.render(seeds, "binding", false)
+      expect(restored[2].description).toBe("firecrawl: Scrapes a page")
+      expect(restored[3].description).toBe("Searches the web")
     })
   })
 })

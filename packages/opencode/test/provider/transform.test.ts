@@ -585,8 +585,8 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
         promptBase: {
           reconcileSystem: (input: { blocks: SystemBlock[] }) => Effect.succeed({ blocks: input.blocks, appended: [] }),
           reconcileTools: (input: { seeds: ToolSeed[] }) =>
-            Effect.succeed({ entries: input.seeds, appended: [], mode: "advisory" as const }),
-          entries: () => Effect.succeed({ entries: [], mode: undefined }),
+            Effect.succeed({ entries: input.seeds, appended: [], mode: "advisory" as const, wrapper: false }),
+          entries: () => Effect.succeed({ entries: [], mode: undefined, wrapper: undefined }),
         },
         flags: { outputTokenMax: 32_000, client: "test" } as any,
         data: "/tmp",

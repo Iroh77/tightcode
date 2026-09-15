@@ -51,8 +51,10 @@ export const PLACEHOLDER: JSONSchema7 = { type: "object", properties: {} }
 // R12-002 eager set, keyed by production registry ids. The shell tool's
 // exposed id is "bash" (ShellID.ToolID — kept for plugin/permission
 // compatibility, rename planned upstream), so the requirement's "shell"
-// resolves to "bash" here.
-const EAGER = new Set(["bash", "read", "load_tool"])
+// resolves to "bash" here. "deferred_tool" is only ever IN the universe on
+// binding+wrapper sessions (gated at the SessionTools.resolve confluence),
+// where it must be eager (R12-012).
+const EAGER = new Set(["bash", "read", "load_tool", "deferred_tool"])
 
 const TRUNCATE_BOUND = 100
 
@@ -82,27 +84,39 @@ export const shape = (input: { universe: UniverseTool[]; ruleset: PermissionV1.R
     }))
 }
 
-export const render = (entries: FrozenToolEntry[], mode: Verdict): ListingEntry[] => {
+// The (verdict, wrapperAxis) listing policy (R12-012): on binding sessions
+// with the wrapper enabled, deferred entries produce NO listing entry at all —
+// the payload reaches them through deferred_tool and the catalog instead.
+// Advisory wins defensively: the pair advisory+wrapper cannot occur
+// (wrapperActive requires binding). wrapper=false restores the round-1 bytes
+// for both modes (the kill-switch path).
+export const render = (entries: FrozenToolEntry[], mode: Verdict, wrapper: boolean): ListingEntry[] => {
   // R12-003 prefix-once, owned by the group's first-written entry (decision
   // tool-lazy-loading-03 §2 as amended at ticket 02 close): recomputing an
   // alphabetical winner per render would move the prefix onto later appends
-  // and mutate frozen entries, which R12-008 forbids.
+  // and mutate frozen entries, which R12-008 forbids. Ownership is computed
+  // over the full frozen list before any omission — wrapper sessions never
+  // move an owner (owners only matter where deferred entries render).
   const owner = new Map<string, string>()
   for (const entry of entries) {
     if (entry.kind !== "deferred" || entry.server === undefined) continue
     if (!owner.has(entry.server)) owner.set(entry.server, entry.name)
   }
-  return entries.map((entry) => {
+  const views: ListingEntry[] = []
+  for (const entry of entries) {
     if (entry.kind === "eager") {
-      return { name: entry.name, description: entry.fullDescription, jsonSchema: entry.jsonSchema }
+      views.push({ name: entry.name, description: entry.fullDescription, jsonSchema: entry.jsonSchema })
+      continue
     }
+    if (mode === "binding" && wrapper) continue
     const prefix = entry.server !== undefined && owner.get(entry.server) === entry.name ? `${entry.server}: ` : ""
-    return {
+    views.push({
       name: entry.name,
       description: prefix + truncate100(entry.fullDescription),
       jsonSchema: mode === "binding" ? entry.jsonSchema : PLACEHOLDER,
-    }
-  })
+    })
+  }
+  return views
 }
 
 function validate(universe: UniverseTool[]) {

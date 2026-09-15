@@ -14,6 +14,7 @@ import type { Provider } from "../../src/provider/provider"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { SystemPrompt } from "../../src/session/system"
 import type { ToolSeed, Verdict } from "../../src/session/tool-listing"
+import { DEFERRED_TOOL_DESCRIPTION, DEFERRED_TOOL_SCHEMA } from "../../src/tool/deferred_tool"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([PromptBase.node, RuntimeFlags.node])))
@@ -81,6 +82,7 @@ const prepareWith = (input: {
   tools?: Record<string, Tool>
   toolSeeds?: ToolSeed[]
   toolVerdict?: Verdict
+  toolWrapper?: boolean
 }) =>
   Effect.gen(function* () {
     return yield* LLMRequestPrep.prepare({
@@ -102,6 +104,7 @@ const prepareWith = (input: {
       tools: input.tools ?? {},
       toolSeeds: input.toolSeeds ?? [],
       toolVerdict: input.toolVerdict,
+      toolWrapper: input.toolWrapper,
       provider,
       auth: undefined,
       plugin,
@@ -524,6 +527,196 @@ describe("session.llm-request-prep.tool-freeze", () => {
         toolSeeds: seedsTurn(),
       })
       expect(prepared.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
+    }),
+  )
+})
+
+describe("session.llm-request-prep.wrapper-payload (R12-012, ticket 17)", () => {
+  const toolSchema = (label: string): JSONSchema7 => ({
+    type: "object",
+    properties: { label: { type: "string", const: label } },
+    required: ["label"],
+  })
+
+  const seed = (name: string, kind: "eager" | "deferred" = "deferred", description?: string, server?: string): ToolSeed => ({
+    name,
+    kind,
+    fullDescription: description ?? `${name} description`,
+    jsonSchema: toolSchema(name),
+    ...(server ? { server } : {}),
+  })
+
+  const fullTool = (name: string, description: string): Tool =>
+    aiTool({
+      description,
+      inputSchema: jsonSchema(toolSchema(name)),
+      execute: async () => ({ output: "", title: "", metadata: {} }),
+    })
+
+  const long = "find files by glob patterns " + "y".repeat(80)
+
+  // The per-turn record mirrors what SessionTools.resolve produces on a
+  // wrapper session: eager load_tool + deferred_tool seeds, glob as a deferred
+  // seed, and a per-turn AITool record that still carries glob's full facts.
+  const wrapperSeeds = (): ToolSeed[] => [
+    seed("load_tool", "eager"),
+    seed("deferred_tool", "eager", DEFERRED_TOOL_DESCRIPTION),
+    seed("glob", "deferred", long),
+  ]
+  const wrapperTools = (): Record<string, Tool> => ({
+    load_tool: fullTool("load_tool", "Loads a deferred tool"),
+    glob: fullTool("glob", long),
+  })
+
+  // Round-1 seeds (no meta tool): what SessionTools.resolve produces on
+  // advisory or kill-switch sessions — deferred_tool never enters the universe.
+  const round1Seeds = (): ToolSeed[] => [seed("load_tool", "eager"), seed("glob", "deferred", long)]
+
+  it.instance("wrapper session: frozen deferred entries are dropped from the payload; eager entries stay", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_drop",
+        tools: wrapperTools(),
+        toolSeeds: wrapperSeeds(),
+        toolVerdict: "binding",
+        toolWrapper: true,
+      })
+      // R12-012: glob is not in the tools array in any form — the per-turn
+      // record's full facts must not leak through impose.
+      expect(Object.keys(prepared.tools).toSorted()).toEqual(["deferred_tool", "load_tool"])
+      // the eager meta-tool seed rides the payload; this ticket ships the seed
+      // only — no live closure exists yet, so impose's clearly-failing fallback
+      // carries it until ticket 19 constructs the meta-tool at the confluence
+      expect(prepared.tools.deferred_tool.description).toBe(DEFERRED_TOOL_DESCRIPTION)
+      expect(prepared.tools.deferred_tool.execute).toBeDefined()
+      expect(prepared.tools.load_tool.inputSchema).toEqual(jsonSchema(toolSchema("load_tool")))
+    }),
+  )
+
+  it.instance("the frozen pair decides: a mid-session wrapper flip cannot re-add dropped entries", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const first = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_frozen",
+        tools: wrapperTools(),
+        toolSeeds: wrapperSeeds(),
+        toolVerdict: "binding",
+        toolWrapper: true,
+      })
+      expect(first.tools.glob).toBeUndefined()
+
+      // a later turn reports wrapper=false (kill-switch flipped mid-session);
+      // the frozen wrapper=true still governs the written shapes
+      const after = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_frozen",
+        tools: wrapperTools(),
+        toolSeeds: wrapperSeeds(),
+        toolVerdict: "binding",
+        toolWrapper: false,
+      })
+      expect(after.tools.glob).toBeUndefined()
+      expect(after.tools.deferred_tool).toBeDefined()
+
+      // the mirror: a session that started wrapper=false keeps glob listed
+      // even when a later turn reports wrapper=true
+      yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_frozen_off",
+        tools: wrapperTools(),
+        toolSeeds: round1Seeds(),
+        toolVerdict: "binding",
+        toolWrapper: false,
+      })
+      const late = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_frozen_off",
+        tools: wrapperTools(),
+        toolSeeds: round1Seeds(),
+        toolVerdict: "binding",
+        toolWrapper: true,
+      })
+      expect(late.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
+    }),
+  )
+
+  it.instance("non-frozen per-turn tools (StructuredOutput, _noop) pass through on wrapper sessions", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const structuredOutput = fullTool("StructuredOutput", "Return structured output")
+      const noop = fullTool("_noop", "Do not call this tool.")
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_pass",
+        tools: { ...wrapperTools(), StructuredOutput: structuredOutput, _noop: noop },
+        toolSeeds: wrapperSeeds(),
+        toolVerdict: "binding",
+        toolWrapper: true,
+      })
+      expect(prepared.tools.StructuredOutput.description).toBe("Return structured output")
+      expect(prepared.tools.StructuredOutput.inputSchema).toEqual(jsonSchema(toolSchema("StructuredOutput")))
+      expect(prepared.tools._noop.description).toBe("Do not call this tool.")
+    }),
+  )
+
+  it.instance("advisory payload is unchanged by the wrapper axis (defensive advisory-wins)", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_advisory",
+        tools: wrapperTools(),
+        toolSeeds: round1Seeds(),
+        toolVerdict: "advisory",
+        toolWrapper: true,
+      })
+      expect(Object.keys(prepared.tools).toSorted()).toEqual(["glob", "load_tool"])
+      expect(prepared.tools.glob.inputSchema).toEqual(jsonSchema({ type: "object", properties: {} }))
+      expect(prepared.tools.glob.description).toBe(long.slice(0, long.lastIndexOf(" ")) + "...")
+    }),
+  )
+
+  it.instance("binding with the wrapper kill-switch: schema-eager round-1 payload bytes", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_kill",
+        tools: wrapperTools(),
+        toolSeeds: round1Seeds(),
+        toolVerdict: "binding",
+        toolWrapper: false,
+      })
+      expect(Object.keys(prepared.tools).toSorted()).toEqual(["glob", "load_tool"])
+      expect(prepared.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
+      expect(prepared.tools.glob.description).toBe(long.slice(0, long.lastIndexOf(" ")) + "...")
+
+      // a missing toolWrapper resolves round-1 semantics (false) as well
+      const missing = yield* prepareWith({
+        promptBase,
+        flags: base,
+        sessionID: "ses_wrapper_kill_missing",
+        tools: wrapperTools(),
+        toolSeeds: round1Seeds(),
+        toolVerdict: "binding",
+      })
+      expect(missing.tools.glob.inputSchema).toEqual(jsonSchema(toolSchema("glob")))
     }),
   )
 })
