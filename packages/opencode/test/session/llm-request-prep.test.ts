@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, spyOn } from "bun:test"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -11,6 +11,8 @@ import os from "os"
 import path from "path"
 import type { Agent } from "../../src/agent/agent"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import BASE_TEMPLATE from "../../src/session/prompt/default.txt"
+import { TestInstance } from "../fixture/fixture"
 import { LLMRequestPrep } from "../../src/session/llm/request"
 import { PromptBase, type SystemBlock } from "../../src/session/llm/prompt-base"
 import type { Plugin } from "../../src/plugin"
@@ -88,6 +90,8 @@ const prepareWith = (input: {
   toolVerdict?: Verdict
   toolWrapper?: boolean
   data?: string
+  agent?: Agent.Info
+  promptOverride?: Record<string, string | { file: string }>
 }) =>
   Effect.gen(function* () {
     return yield* LLMRequestPrep.prepare({
@@ -101,7 +105,8 @@ const prepareWith = (input: {
       },
       sessionID: input.sessionID ?? "ses_prep",
       model,
-      agent,
+      agent: input.agent ?? agent,
+      promptOverride: input.promptOverride,
       permission: [],
       system: input.system ?? blocks("instructions v1"),
       messages: input.messages ?? [],
@@ -891,6 +896,155 @@ describe("session.llm-request-prep.capture-verdict-binary (R13-003/005, ticket 2
       expect("verdict" in small.meta).toBe(false)
       expect(bypass.meta.binary).toBe(InstallationVersion)
       expect(small.meta.binary).toBe(InstallationVersion)
+    }),
+  )
+})
+
+describe("session.llm-request-prep.prompt-override (R11-007, ticket 33)", () => {
+  it.instance("no override record: the built-in base renders (cascade bottom)", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({ promptBase, flags: base })
+      expect(prepared.system[0].startsWith(BASE_TEMPLATE)).toBe(true)
+    }),
+  )
+
+  it.instance("inline override replaces the built-in base for the selected template", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({ promptBase, flags: base, promptOverride: { default: "FORK OVERRIDE PROMPT" } })
+      expect(prepared.system[0].startsWith("FORK OVERRIDE PROMPT")).toBe(true)
+      expect(prepared.system[0]).not.toContain(BASE_TEMPLATE)
+    }),
+  )
+
+  it.instance("agent.prompt wins over the override (cascade top)", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        agent: { ...agent, prompt: "AGENT PROMPT" },
+        promptOverride: { default: "FORK OVERRIDE PROMPT" },
+      })
+      expect(prepared.system[0].startsWith("AGENT PROMPT")).toBe(true)
+      expect(prepared.system[0]).not.toContain("FORK OVERRIDE PROMPT")
+    }),
+  )
+
+  it.instance("inline override values pass through verbatim (no trim, no normalization)", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({ promptBase, flags: base, promptOverride: { default: "\n  FORK  VERBATIM\n" } })
+      expect(prepared.system[0].startsWith("\n  FORK  VERBATIM\n")).toBe(true)
+    }),
+  )
+
+  it.instance("empty inline override: the base text is sent empty (explicit no-base slimming)", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({ promptBase, flags: base, promptOverride: { default: "" } })
+      expect(prepared.system[0]).toBe([...PromptBase.render(blocks("instructions v1"))].join("\n"))
+    }),
+  )
+
+  it.instance("unknown template keys are inert: the built-in base renders", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({ promptBase, flags: base, promptOverride: { anthropic: "WRONG TEMPLATE" } })
+      expect(prepared.system[0]).toEqual(expectedSystem(blocks("instructions v1"))[0])
+    }),
+  )
+
+  it.instance("render substitutes {{MODEL_NAME}} only when the selected template is meta; provider composes base+render", () =>
+    Effect.gen(function* () {
+      expect(SystemPrompt.render("Hello {{MODEL_NAME}}", { name: "Muse Glimmer" })).toBe("Hello Muse Glimmer")
+      expect(SystemPrompt.render("Hello {{MODEL_NAME}}", { name: undefined })).toBe("Hello {{MODEL_NAME}}")
+
+      const metaModel: Provider.Model = { ...model, api: { ...model.api, id: "x-muse-glimmer-y" } }
+      const meta = SystemPrompt.base(metaModel)
+      expect(meta.template).toBe("meta")
+      expect(meta.name).toBe("Muse Glimmer")
+      expect(SystemPrompt.render(meta.raw, meta)).toEqual(SystemPrompt.provider(metaModel)[0])
+
+      const selected = SystemPrompt.base(model)
+      expect(selected.template).toBe("default")
+      expect(selected.name).toBeUndefined()
+      expect(selected.raw).toEqual(BASE_TEMPLATE)
+      expect(SystemPrompt.render(selected.raw, selected)).toEqual(SystemPrompt.provider(model)[0])
+    }),
+  )
+
+  it.instance("small turns apply the override (the bypass skips PromptBase only)", () =>
+    Effect.gen(function* () {
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const prepared = yield* prepareWith({
+        promptBase,
+        flags: base,
+        small: true,
+        system: blocks("instructions small-turn"),
+        promptOverride: { default: "OVERRIDE ON SMALL TURN" },
+      })
+      expect(prepared.system[0].startsWith("OVERRIDE ON SMALL TURN")).toBe(true)
+      expect(prepared.system[0]).toContain("instructions small-turn")
+    }),
+  )
+
+  it.instance("file reference resolves relative to the instance directory and reads fresh per turn", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const promptsDir = path.join(test.directory, "prompts")
+      yield* Effect.promise(() => fs.mkdir(promptsDir, { recursive: true }))
+      const slim = path.join(promptsDir, "slim.md")
+      yield* Effect.promise(() => Bun.write(slim, "FILE BASE V1"))
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const input = { promptBase, flags: base, promptOverride: { default: { file: "./prompts/slim.md" } } }
+      const first = yield* prepareWith(input)
+      expect(first.system[0].startsWith("FILE BASE V1")).toBe(true)
+
+      yield* Effect.promise(() => Bun.write(slim, "FILE BASE V2"))
+      const second = yield* prepareWith(input)
+      expect(second.system[0].startsWith("FILE BASE V2")).toBe(true)
+    }),
+  )
+
+  it.instance("file reference expands ~/ against the home directory", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const home = spyOn(os, "homedir").mockImplementation(() => test.directory)
+      try {
+        yield* Effect.promise(() => Bun.write(path.join(test.directory, "home-slim.md"), "HOME FILE BASE"))
+        const promptBase = yield* PromptBase.Service
+        const base = yield* RuntimeFlags.Service
+        const prepared = yield* prepareWith({
+          promptBase,
+          flags: base,
+          promptOverride: { default: { file: "~/home-slim.md" } },
+        })
+        expect(prepared.system[0].startsWith("HOME FILE BASE")).toBe(true)
+      } finally {
+        home.mockRestore()
+      }
+    }),
+  )
+
+  it.instance("missing file reference fails the prepare loudly, naming the resolved path (R00-010)", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const promptBase = yield* PromptBase.Service
+      const base = yield* RuntimeFlags.Service
+      const error = yield* Effect.flip(
+        prepareWith({ promptBase, flags: base, promptOverride: { default: { file: "./missing.md" } } }),
+      )
+      expect(error.message).toContain(path.join(test.directory, "missing.md"))
     }),
   )
 })

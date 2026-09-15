@@ -16,6 +16,9 @@ import { PromptCapture } from "./prompt-capture"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
+import fs from "fs/promises"
+import os from "os"
+import path from "path"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 
@@ -42,6 +45,10 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly promptBase: PromptBase.Interface
   readonly flags: RuntimeFlags.Info
+  // R11-007 config prompt overrides, threaded from the LLM layer (cfg is
+  // already resolved per run there). Keyed by built-in template name; inline
+  // text or { file } resolved against the instance working directory.
+  readonly promptOverride?: Record<string, string | { file: string }>
   // App data dir, captured at the LLM layer build (Global is a build-time
   // dependency there, not a runtime service — the capture sink must not add
   // one to the per-turn context).
@@ -111,6 +118,22 @@ const impose = (
   return result
 }
 
+// R11-007 file reference: exact path against the instance working directory
+// (~/ expanded against the home directory), no glob, no ancestor walk, read
+// fresh per provider turn. Missing/unreadable fails the turn loudly naming
+// the resolved path (R00-010) — a silent fallback to the built-in would
+// change the payload unobserved.
+const readOverrideFile = (file: string) =>
+  Effect.flatMap(InstanceState.context, (ctx) => {
+    const resolved = file.startsWith("~/")
+      ? path.resolve(os.homedir(), file.slice(2))
+      : path.resolve(ctx.directory, file)
+    return Effect.tryPromise({
+      try: () => fs.readFile(resolved, "utf8"),
+      catch: () => new Error(`The system_prompt override references an unreadable file: ${resolved}`),
+    })
+  })
+
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
   // Kill-switch (SC-3) and small turns (summary/compaction) stay per-turn
@@ -143,9 +166,28 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         // schema-eager binding (the kill-switch path).
         wrapper: input.toolWrapper ?? false,
       })
+  // R11-007 inline cascade at the position-0 seam (cut A'): agent prompt
+  // (upstream mechanism, verbatim) > config override > built-in. base(model)
+  // is invoked once per turn and shared by all steps; override values pass
+  // through verbatim except the meta {{MODEL_NAME}} substitution, which is
+  // the built-in's own rendering step (render). An empty value sends an
+  // empty base (explicit no-base slimming). Unknown template keys are inert
+  // by contract (non-application is observable in captures). Overrides apply
+  // on small turns too — the bypass below skips PromptBase only, and the
+  // base text never enters the keyed-block freeze (next-turn application).
+  const selected = SystemPrompt.base(input.model)
+  const override = input.promptOverride?.[selected.template]
+  const baseText =
+    input.agent.prompt
+      ? input.agent.prompt
+      : override === undefined
+        ? SystemPrompt.render(selected.raw, selected)
+        : typeof override === "string"
+          ? SystemPrompt.render(override, selected)
+          : SystemPrompt.render(yield* readOverrideFile(override.file), selected)
   const system = [
     [
-      ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+      baseText,
       ...PromptBase.render(systemBlocks),
       ...(input.user.system ? [input.user.system] : []),
     ]

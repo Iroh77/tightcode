@@ -27,28 +27,46 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ContextSlimmer } from "./context-slimmer"
 import type { SystemBlock } from "./llm/prompt-base"
 
-export function provider(model: Provider.Model) {
+// Template selection exposed for the R11-007 override cascade: the override
+// config key vocabulary is the built-in template name, so the upstream
+// substring matching must be visible to the position-0 seam (request.ts).
+// provider stays byte-identical — it composes base + render.
+export type TemplateName = "anthropic" | "beast" | "codex" | "default" | "gemini" | "gpt" | "kimi" | "meta" | "trinity"
+
+export function base(model: Provider.Model): { template: TemplateName; raw: string; name: string | undefined } {
   if (model.api.id.includes("muse")) {
     const name = model.api.id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark"
-    return [PROMPT_META.replaceAll("{{MODEL_NAME}}", name)]
+    return { template: "meta", raw: PROMPT_META, name }
   }
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-    return [PROMPT_BEAST]
+    return { template: "beast", raw: PROMPT_BEAST, name: undefined }
   if (model.api.id.includes("gpt")) {
     if (model.api.id.includes("codex")) {
-      return [PROMPT_CODEX]
+      return { template: "codex", raw: PROMPT_CODEX, name: undefined }
     }
-    return [PROMPT_GPT]
+    return { template: "gpt", raw: PROMPT_GPT, name: undefined }
   }
-  if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
-  if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
-  if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
+  if (model.api.id.includes("gemini-")) return { template: "gemini", raw: PROMPT_GEMINI, name: undefined }
+  if (model.api.id.includes("claude")) return { template: "anthropic", raw: PROMPT_ANTHROPIC, name: undefined }
+  if (model.api.id.toLowerCase().includes("trinity")) return { template: "trinity", raw: PROMPT_TRINITY, name: undefined }
   if (
     model.api.id.toLowerCase().includes("kimi") ||
     ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(model.providerID)
   )
-    return [PROMPT_KIMI]
-  return [PROMPT_DEFAULT]
+    return { template: "kimi", raw: PROMPT_KIMI, name: undefined }
+  return { template: "default", raw: PROMPT_DEFAULT, name: undefined }
+}
+
+// Shared rendering step for the built-in base and override values alike
+// (Amendment 1 §3): the muse display name is substituted iff the selected
+// template is meta — meta was the only template carrying the placeholder.
+export function render(text: string, base: { name: string | undefined }): string {
+  return base.name === undefined ? text : text.replaceAll("{{MODEL_NAME}}", base.name)
+}
+
+export function provider(model: Provider.Model) {
+  const selected = base(model)
+  return [render(selected.raw, selected)]
 }
 
 export interface Interface {

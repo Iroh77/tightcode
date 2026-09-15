@@ -121,6 +121,7 @@ const live: Layer.Layer<
         plugin,
         promptBase,
         flags,
+        promptOverride: cfg.system_prompt,
         data: global.data,
         isWorkflow,
       })

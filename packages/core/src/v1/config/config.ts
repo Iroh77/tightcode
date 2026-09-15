@@ -124,6 +124,12 @@ export const Info = Schema.Struct({
   instructions: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
     description: "Additional instruction files or patterns to include",
   }),
+  system_prompt: Schema.optional(
+    Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Struct({ file: Schema.String })])),
+  ).annotate({
+    description:
+      "Fork (R11-007) — replace built-in base system prompt templates by template name. Value: inline text or { \"file\": path } (relative paths resolve against the instance working directory, read fresh per provider turn). Cascade: agent prompt > override > built-in. Unknown template names are inert.",
+  }),
   layout: Schema.optional(ConfigLayoutV1.Layout).annotate({ description: "@deprecated Always uses stretch layout." }),
   permission: Schema.optional(ConfigPermissionV1.Info),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
