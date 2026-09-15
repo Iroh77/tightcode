@@ -83,3 +83,102 @@ neutral, and run both legs from the same shell.
 Record the run dirs and the diff output with the R10-005 amendment. Residual
 provider nondeterminism (even at temperature 0) shows up as small per-turn
 deltas — that is inherent and expected in the diff.
+## Campaign mode (R13-002/003/006)
+
+For robust fork-vs-upstream comparisons — interleaved runs, medians, verdict
+isolation — drive a whole campaign from one spec file instead of single pairs:
+
+```
+bun run script/reference-workload.ts --campaign <spec.json> --out <dir> [--stub]
+```
+
+A **phase** is a workload variant (`name` + `model` + optional `mcp` config
+fragment merged into the generated `opencode.json`); a **leg** is a shape
+(`fork`/`upstream`, optional `proxy: true` attribution leg). Spec example:
+
+```json
+{
+  "phases": [
+    { "name": "base", "model": "<provider/model>" },
+    {
+      "name": "mcp",
+      "model": "<provider/model>",
+      "mcp": { "firecrawl": { "type": "remote", "url": "https://mcp.firecrawl.dev", "headers": { "Authorization": "Bearer {env:FIRECRAWL_API_KEY}" } } }
+    }
+  ],
+  "legs": [
+    { "shape": "fork", "bin": "<fork bin>" },
+    { "shape": "upstream", "bin": "opencode" },
+    { "shape": "fork", "bin": "<fork bin>", "proxy": true }
+  ],
+  "runs": 3,
+  "seed": 42,
+  "pin": "binding"
+}
+```
+
+- `runs` — N per (phase × leg), default 3, minimum 2 (never single runs; N=1
+  is refused at validation).
+- `seed` — optional. When omitted a random 32-bit seed is drawn and recorded
+  in `campaign.json`; the schedule (per phase, legs × N Fisher–Yates-shuffled,
+  executed strictly sequentially) reproduces exactly from the recorded seed.
+  Sequential execution is deliberate: interleaving neutralizes run-order
+  confounds such as account-level cache warmth.
+- `pin` — optional `"binding" | "advisory"`, set as
+  `OPENCODE_PIN_BINDING_VERDICT` on every leg (upstream ignores it). Pin when
+  comparing payloads so the run does not measure the verdict probe's
+  cache/table state instead; unpinned legs report whatever the probe actually
+  resolved.
+
+Out-dir layout: `campaign.json` (spec echo + seed + per-run schedule/status,
+written progressively and aborted on the first failure — a half-run leg would
+poison its medians) plus one v1-layout run dir per run
+(`<NN>-<phase>-<shape>[-proxy]/`). Capture env is set on fork-shape legs only:
+real upstream binaries ignore the flag either way, and the stub obeys it, so
+the upstream capture-lessness is simulated faithfully offline.
+
+Report:
+
+```
+bun run script/measure-usage.ts campaign <dir> [-o out.json]
+```
+
+- **Medians, never single runs.** Per leg and phase: cold-start input (first
+  provider turn — cache-cold by construction, the primary volume metric),
+  session input (Σ per turn of `input + cacheRead + cacheWrite` — re-billing
+  and account warmth move tokens between columns, never out of the sum), and
+  payload chars (capture-bearing fork legs). Each column is a median with
+  dispersion (`median`/`min`/`max` + the raw per-run `values`).
+- **Verdict column + flip semantics (R13-003).** A comparison pair is
+  `comparable` only when the fork side's runs record exactly one identical
+  verdict (each manifest's `verdicts`, derived from the captures' per-turn
+  `meta.verdict`). Upstream legs (no verdict machinery) and fork-proxy legs
+  (kill-switched — the verdict axis is inert) are exempt: their column is null
+  by design. A flip across runs, a mixed run (≥2 verdicts), or an
+  unrecordable fork verdict surfaces as `comparable: false` with a warning
+  naming the run dirs — medians stay emitted, labeled incomparable, never
+  silently folded into a delta.
+- **Binary identity (R13-005).** Every manifest records what produced the run
+  (`<bin> --version` — fork commit or upstream release; `"stub"` in stub
+  mode), so post-hoc analysis can never confuse which shape generated a dump.
+- **Cache-collapse flags** in the per-leg diagnostics are a heuristic
+  (`cacheRead < 0.5 × previous turn's total input`) — diagnostic only,
+  expected to fire after deliberate prompt-base append batches; never a
+  headline metric.
+
+Campaign mode shares the single-run isolation rules (allowlisted child env,
+credential passthrough, fresh data dir) — run all legs from the same shell.
+Real-model campaigns stay offline from CI (credentials): run them ad hoc from
+an operator shell, exactly like the single-pair procedure above, which remains
+the quick-check path.
+
+## Prompt authority (R13-004)
+
+The prompt list (`prompts.ts`) consists of owner-authored committed literals —
+never runtime-generated or AI-regenerated per session. Editing a prompt (or
+the fixture repo) is an explicit repo change: it changes the workload digest
+pinned in every `manifest.json`, thereby invalidating all recorded runs
+compared against older digests — that is the mechanism working by design, not
+an accident to avoid. Prompts that mutate the fixture must stay
+self-contained: effects visible only within their own turn, so later prompts'
+context remains structurally comparable across legs.
