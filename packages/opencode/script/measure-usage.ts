@@ -13,7 +13,10 @@ import type { CaptureFile } from "../src/session/llm/prompt-capture"
 // Contracts: ARCHITECTURE/detailed/context-observability.md, decision context-observability-02.
 
 // The manifest is the driver's output (ticket 15); the reader validates this
-// exact shape so report/diff inputs stay honest.
+// exact shape so report/diff inputs stay honest. Harness v2 (ticket 28) adds
+// the verdict/identity record as additive optional fields — the v2 driver
+// always writes them (null/[] when nothing to record), v1 manifests read as
+// null/[]. Contracts: ARCHITECTURE/detailed/comparison-testing.md.
 export const RunManifestSchema = Schema.Struct({
   bin: Schema.String,
   modelID: Schema.String,
@@ -25,6 +28,9 @@ export const RunManifestSchema = Schema.Struct({
   capturesDir: Schema.NullOr(Schema.String),
   startedAt: Schema.String,
   endedAt: Schema.String,
+  pin: Schema.optional(Schema.NullOr(Schema.Literals(["binding", "advisory"]))),
+  verdicts: Schema.optional(Schema.Array(Schema.Literals(["binding", "advisory"]))),
+  binary: Schema.optional(Schema.NullOr(Schema.String)),
 })
 
 export type RunManifest = Schema.Schema.Type<typeof RunManifestSchema>
@@ -84,17 +90,26 @@ export type DiffReport = {
 const messageChars = (message: { role: string; content: unknown }) =>
   JSON.stringify({ role: message.role, content: message.content })?.length ?? 0
 
-const estimateTurn = (payload: CaptureFile["payload"]): Estimate => {
+// The single source of the char componentization: the v1 estimator ceil()s
+// these into tokens, payloadChars sums them raw (R13-001 "exact char
+// accounting" — the two can never drift).
+const payloadCharComponents = (payload: CaptureFile["payload"]) => {
   let leading = 0
   while (leading < payload.messages.length && payload.messages[leading].role === "system") leading++
-  const systemChars =
-    payload.system.join("\n").length +
-    payload.messages.slice(0, leading).reduce((sum, message) => sum + messageChars(message), 0)
-  const toolsChars = Object.entries(payload.tools).reduce(
-    (sum, [name, tool]) => sum + name.length + (JSON.stringify(tool.inputSchema)?.length ?? 0) + (tool.description?.length ?? 0),
-    0,
-  )
-  const historyChars = payload.messages.slice(leading).reduce((sum, message) => sum + messageChars(message), 0)
+  return {
+    systemChars:
+      payload.system.join("\n").length +
+      payload.messages.slice(0, leading).reduce((sum, message) => sum + messageChars(message), 0),
+    toolsChars: Object.entries(payload.tools).reduce(
+      (sum, [name, tool]) => sum + name.length + (JSON.stringify(tool.inputSchema)?.length ?? 0) + (tool.description?.length ?? 0),
+      0,
+    ),
+    historyChars: payload.messages.slice(leading).reduce((sum, message) => sum + messageChars(message), 0),
+  }
+}
+
+const estimateTurn = (payload: CaptureFile["payload"]): Estimate => {
+  const { systemChars, toolsChars, historyChars } = payloadCharComponents(payload)
   const systemTokens = Math.ceil(systemChars / 4)
   const toolsTokens = Math.ceil(toolsChars / 4)
   const historyTokens = Math.ceil(historyChars / 4)
@@ -219,6 +234,67 @@ export const diff = (fork: UsageReport, upstream: UsageReport): DiffReport => {
   return { promptsDigest: fork.manifest.promptsDigest, warnings, sessions, totals }
 }
 
+// --- cache-immune comparison metrics (R13-001, ticket 28) ---
+// Pure functions over a loaded run (comparison-testing.md §Module contracts):
+// cache-immune by construction, consumed by the v2 campaign aggregation.
+
+// Distinct meta.verdict values across the run's captures, sorted. [] = none
+// observable; ≥2 = mixed (a finding, never averaged away).
+export const deriveVerdicts = (captureRecords: CaptureRecord[]): Array<"binding" | "advisory"> =>
+  [...new Set(captureRecords.map((record) => record.capture.meta.verdict).filter((v) => v !== undefined))].sort()
+
+// First provider turn's input tokens: the run's first step-finish row — always
+// the first row of its session (rowid order), so cache-cold by construction.
+// Null when the run has no usage rows.
+export const coldStartInput = (run: Run): number | null => run.usage[0]?.tokens.input ?? null
+
+// Σ over ALL step-finish rows of (input + cacheRead + cacheWrite). "Cached
+// input" = cacheRead + cacheWrite: re-billing (GLM population lag) moves
+// tokens between input and cacheWrite, account warmth (DeepSeek) between
+// input and cacheRead — never out of the sum.
+export const sessionInput = (run: Run): number =>
+  run.usage.reduce((sum, record) => sum + record.tokens.input + record.tokens.cacheRead + record.tokens.cacheWrite, 0)
+
+// Σ over captures of the v1 estimator's exact char accounting without
+// ceil(/4) (same componentization as estimateTurn). Null when the run has no
+// captures.
+export const payloadChars = (run: Run): number | null => {
+  if (run.captures.length === 0) return null
+  return run.captures.reduce((sum, record) => {
+    const { systemChars, toolsChars, historyChars } = payloadCharComponents(record.capture.payload)
+    return sum + systemChars + toolsChars + historyChars
+  }, 0)
+}
+
+// Cache-collapse heuristic flag (R13-001): turn i ≥ 1 flagged when its
+// cacheRead collapsed below the ratio × previous turn's total input.
+// Diagnostic-only by contract — prompt-base append batches legitimately fire
+// it, so it is never a headline metric, never in medians. Rows are the
+// step-finish records in loadRun order (session-rowid, contiguous per
+// session); flags reset per session.
+export const CACHE_COLLAPSE_RATIO = 0.5
+
+export const cacheCollapseFlags = (rows: StepFinishRecord[]): Array<{ turn: number; cacheRead: number; expectedPrefix: number }> => {
+  const flags: Array<{ turn: number; cacheRead: number; expectedPrefix: number }> = []
+  let sessionID: string | undefined
+  let turn = -1
+  let prevTotal = 0
+  for (const row of rows) {
+    if (row.sessionID !== sessionID) {
+      sessionID = row.sessionID
+      turn = -1
+      prevTotal = 0
+    }
+    turn++
+    if (turn >= 1) {
+      const expectedPrefix = CACHE_COLLAPSE_RATIO * prevTotal
+      if (row.tokens.cacheRead < expectedPrefix) flags.push({ turn, cacheRead: row.tokens.cacheRead, expectedPrefix })
+    }
+    prevTotal = row.tokens.input + row.tokens.cacheRead + row.tokens.cacheWrite
+  }
+  return flags
+}
+
 // --- run-dir readers (offline tool: manifest/DB problems fail loudly, R00-010) ---
 
 const readManifest = async (runDir: string): Promise<RunManifest> => {
@@ -248,7 +324,7 @@ const isCaptureFile = (value: unknown): value is CaptureFile => {
   )
 }
 
-const readCaptures = async (capturesDir: string, runDir: string): Promise<CaptureRecord[]> => {
+export const readCaptures = async (capturesDir: string, runDir: string): Promise<CaptureRecord[]> => {
   const dirEntries = await fs.readdir(capturesDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null
     throw error

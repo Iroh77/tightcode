@@ -1,9 +1,26 @@
 import { describe, expect, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
+import { Schema } from "effect"
 import fs from "fs/promises"
 import path from "path"
 import { tmpdir } from "./fixture/fixture"
-import { diff, loadRun, report, type RunManifest, type StepFinishRecord, type UsageReport } from "../script/measure-usage"
+import {
+  cacheCollapseFlags,
+  CACHE_COLLAPSE_RATIO,
+  coldStartInput,
+  deriveVerdicts,
+  diff,
+  loadRun,
+  payloadChars,
+  report,
+  RunManifestSchema,
+  sessionInput,
+  type CaptureRecord,
+  type Run,
+  type RunManifest,
+  type StepFinishRecord,
+  type UsageReport,
+} from "../script/measure-usage"
 import type { CaptureFile } from "../src/session/llm/prompt-capture"
 
 const manifest = (input?: Partial<RunManifest>): RunManifest => ({
@@ -396,5 +413,138 @@ describe("usage-report.cli", () => {
     const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited])
     expect(code).toBe(1)
     expect(stderr).toMatch(/promptsDigest/)
+  })
+})
+
+// Harness v2 seams (R13-001/003/005, ticket 28): the run manifest becomes the
+// verdict/identity record and the comparison metrics are named pure functions.
+// Contracts: ARCHITECTURE/detailed/comparison-testing.md §Module contracts.
+
+describe("manifest v2 schema", () => {
+  test("v1 manifests (absent v2 fields) validate — old run dirs stay loadable", () => {
+    expect(Schema.is(RunManifestSchema)(manifest())).toBe(true)
+  })
+
+  test("v2 fields validate when present", () => {
+    expect(
+      Schema.is(RunManifestSchema)(manifest({ pin: "binding", verdicts: ["binding"], binary: "1.2.3" })),
+    ).toBe(true)
+    expect(Schema.is(RunManifestSchema)(manifest({ pin: null, verdicts: [], binary: null }))).toBe(true)
+  })
+
+  test("invalid v2 values fail validation", () => {
+    expect(Schema.is(RunManifestSchema)(manifest({ pin: "bogus" as unknown as RunManifest["pin"] }))).toBe(false)
+    expect(Schema.is(RunManifestSchema)(manifest({ verdicts: ["bogus"] as unknown as RunManifest["verdicts"] }))).toBe(false)
+    expect(Schema.is(RunManifestSchema)(manifest({ binary: 42 as unknown as string }))).toBe(false)
+  })
+
+  test("old run dirs load and report unchanged", async () => {
+    await using tmp = await tmpdir()
+    await writeRun(tmp.path, {
+      manifest: manifest(),
+      sessions: ["ses_a"],
+      parts: [{ sessionID: "ses_a", data: stepFinish({ input: 10 }) }],
+      captures: [{ sessionID: "ses_a", seq: 0, file: capture("ses_a") }],
+    })
+    const run = await loadRun(tmp.path)
+    const result = report(run)
+    expect(result.sessions[0]?.turns[0]?.reconciled).toEqual({ systemTokens: 1, toolsTokens: 4, historyTokens: 5 })
+  })
+})
+
+describe("deriveVerdicts", () => {
+  const verdictCapture = (file: string, verdict?: "binding" | "advisory"): CaptureRecord => ({
+    file,
+    capture: capture("ses_a", file, undefined, verdict === undefined ? {} : { verdict }),
+  })
+
+  test("single verdict", () => {
+    expect(deriveVerdicts([verdictCapture("a", "binding"), verdictCapture("b", "binding")])).toEqual(["binding"])
+  })
+
+  test("mixed verdicts: distinct, sorted, both recorded (never averaged away)", () => {
+    expect(deriveVerdicts([verdictCapture("a", "binding"), verdictCapture("b", "advisory"), verdictCapture("c", "binding")])).toEqual([
+      "advisory",
+      "binding",
+    ])
+  })
+
+  test("no captures or absent meta.verdict → []", () => {
+    expect(deriveVerdicts([])).toEqual([])
+    expect(deriveVerdicts([verdictCapture("a"), verdictCapture("b")])).toEqual([])
+  })
+})
+
+describe("cache-immune metrics", () => {
+  const runWith = (input?: Partial<Run>): Run => ({
+    manifest: manifest(),
+    sessions: ["ses_a"],
+    captures: [],
+    usage: [],
+    ...input,
+  })
+
+  test("coldStartInput = first step-finish row's input; null without usage rows", () => {
+    expect(coldStartInput(runWith({ usage: [usageRow("ses_a", 10), usageRow("ses_a", 20)] }))).toBe(10)
+    expect(coldStartInput(runWith())).toBeNull()
+  })
+
+  test("sessionInput = Σ(input + cacheRead + cacheWrite); re-billing keeps the sum stable", () => {
+    // Cache-population lag (GLM): turn billed 100 input + 50 cacheWrite on one
+    // run, 150 flat input on another — the sum is invariant.
+    const populated = runWith({
+      usage: [
+        usageRow("ses_a", 100, { tokens: { input: 100, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 50 } }),
+        usageRow("ses_a", 30, { tokens: { input: 30, output: 2, reasoning: 0, cacheRead: 40, cacheWrite: 0 } }),
+      ],
+    })
+    const flat = runWith({
+      usage: [
+        usageRow("ses_a", 150, { tokens: { input: 150, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }),
+        usageRow("ses_a", 70, { tokens: { input: 30, output: 2, reasoning: 0, cacheRead: 40, cacheWrite: 0 } }),
+      ],
+    })
+    expect(sessionInput(populated)).toBe(220)
+    expect(sessionInput(flat)).toBe(220)
+  })
+
+  test("payloadChars = v1 estimator char accounting without ceil(/4); null without captures", () => {
+    // fixture: system 4 + tools 4+17+4 = 25 + history 33 = 62 chars
+    // (v1 estimate would ceil to 1+7+9 = 17 tokens)
+    const run = runWith({ captures: [{ file: "c/0000.json", capture: capture("ses_a") }] })
+    expect(payloadChars(run)).toBe(62)
+    expect(coldStartInput(runWith())).toBeNull()
+    expect(payloadChars(runWith())).toBeNull()
+    const two = runWith({
+      captures: [
+        { file: "c/0000.json", capture: capture("ses_a") },
+        { file: "c/0001.json", capture: capture("ses_a", "msg_2") },
+      ],
+    })
+    expect(payloadChars(two)).toBe(124)
+  })
+
+  test("CACHE_COLLAPSE_RATIO is the documented 0.5 heuristic", () => {
+    expect(CACHE_COLLAPSE_RATIO).toBe(0.5)
+  })
+
+  test("cacheCollapseFlags: fires below ratio × previous total, silent above, never on turn 0", () => {
+    const rows = [
+      usageRow("ses_a", 100, { tokens: { input: 100, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }),
+      usageRow("ses_a", 20, { tokens: { input: 20, output: 2, reasoning: 0, cacheRead: 60, cacheWrite: 0 } }),
+      usageRow("ses_a", 20, { tokens: { input: 20, output: 2, reasoning: 0, cacheRead: 10, cacheWrite: 0 } }),
+    ]
+    // turn 1: 60 >= 0.5×100 → silent; turn 2: 10 < 0.5×80 → flag
+    expect(cacheCollapseFlags(rows)).toEqual([{ turn: 2, cacheRead: 10, expectedPrefix: 40 }])
+    expect(cacheCollapseFlags([rows[0]])).toEqual([])
+  })
+
+  test("cacheCollapseFlags: per-session rows — a new session's first turn is never flagged", () => {
+    const rows = [
+      usageRow("ses_a", 100, { tokens: { input: 100, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }),
+      usageRow("ses_b", 10, { tokens: { input: 10, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }),
+      usageRow("ses_b", 0, { tokens: { input: 0, output: 2, reasoning: 0, cacheRead: 1, cacheWrite: 0 } }),
+    ]
+    expect(cacheCollapseFlags(rows)).toEqual([{ turn: 1, cacheRead: 1, expectedPrefix: 5 }])
   })
 })
