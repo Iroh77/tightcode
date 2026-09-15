@@ -60,14 +60,17 @@ export type Breakdown = {
   totals: SessionTotals
 }
 
-// Round-1 char convention, now per component with the real vocabulary.
+// Per-component accounting rides the payload encoding convention frozen by the
+// R10-008 bound test (estimator.test.ts payloadText): tools as the wire's
+// {"type":"function","function":{…}} JSON, messages as full message JSON,
+// system as the joined payload. Ticket 26's integration re-assertion of the
+// bound through this path holds by construction only under that convention —
+// the bare name+schema+description assembly undercounted deepseek past ±10 %.
 const toolTokens = (est: { estimate: (text: string) => number }, name: string, entry: CaptureFile["payload"]["tools"][string]) =>
-  est.estimate(name) +
-  est.estimate(JSON.stringify(entry.inputSchema) ?? "") +
-  est.estimate(entry.description ?? "")
+  est.estimate(JSON.stringify({ type: "function", function: { name, description: entry.description, parameters: entry.inputSchema } }))
 
 const messageTokens = (est: { estimate: (text: string) => number }, message: { role: string; content: unknown }) =>
-  est.estimate(JSON.stringify({ role: message.role, content: message.content }) ?? "")
+  est.estimate(JSON.stringify(message))
 
 const CATALOG_BULLET = /^- (.+)$/
 
