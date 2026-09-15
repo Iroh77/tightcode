@@ -1,8 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test"
+import { Database } from "bun:sqlite"
+import fs from "fs/promises"
+import path from "path"
 import type { CaptureFile, CaptureMeta } from "../src/session/llm/prompt-capture"
 import { forModel, parseSkillsListing, parseSystemBlocks } from "../script/estimator"
-import { breakdown } from "../script/breakdown"
+import { breakdown, main, type Breakdown } from "../script/breakdown"
 import type { CaptureRecord, RunManifest, StepFinishRecord } from "../script/measure-usage"
+import { tmpdir } from "./fixture/fixture"
 
 // Breakdown core projection (R10-006, ticket 24): fixture captures over the
 // o200k reference estimator (no tokenizer assets needed), covering attribution
@@ -302,5 +306,165 @@ describe("breakdown", () => {
     const listing = parseSkillsListing(skills!.text)
     expect(turn.skills.total).toBe(estimator.estimate(skills!.text))
     expect(turn.skills.headers).toBe(estimator.estimate(listing.headers))
+  })
+})
+
+describe("breakdown --content selection (R10-009, ticket 25)", () => {
+  test("default output is counts-only — no content field anywhere", () => {
+    expect(JSON.stringify(breakdown(fixture))).not.toContain('"content"')
+  })
+
+  test("selected keys resolve 1:1 to schema nodes and gain content", () => {
+    const result = breakdown(fixture, {
+      content: ["system.base", "system.mcp:github", "system.skills", "system.skills:tdd", "tools.bash", "history.1"],
+    })
+    const turn = result.sessions[0].turns[0]
+    const parsed = parseSystemBlocks(captureA0.payload.system)
+    const blocks = new Map(turn.system.blocks.map((block) => [block.key, block]))
+    // Byte-exact: block content is the parser's raw segment text (separators
+    // included), so block contents reconstruct the system payload.
+    expect(blocks.get("base")?.content).toBe(parsed.segments[0].text)
+    expect(blocks.get("mcp:github")?.content).toBe(
+      parsed.segments.find((segment) => segment.label === "mcp:github")!.text,
+    )
+    expect(blocks.get("environment")?.content).toBeUndefined()
+    expect(turn.system.blocks.filter((block) => block.key === "base")).toHaveLength(1)
+    expect(turn.skills.perSkill[0]).toMatchObject({ name: "tdd", content: expect.any(String) })
+    expect(turn.tools.entries.find((entry) => entry.name === "bash")?.content).toEqual({
+      description: "Run shell commands",
+      inputSchema: { type: "object", properties: {} },
+    })
+    expect(turn.tools.entries.find((entry) => entry.name === "load_tool")?.content).toBeUndefined()
+    expect(turn.history.messages[0]).toMatchObject({ index: 1, content: "hello" })
+  })
+
+  test("catalog block content selected on the wrapper turn", () => {
+    const result = breakdown(fixture, { content: ["system.catalog:github", "system.catalog"] })
+    const turn = result.sessions[0].turns[1]
+    const blocks = new Map(turn.system.blocks.map((block) => [block.key, block]))
+    expect(blocks.get("catalog:github")?.content).toContain("<deferred_tools")
+    expect(blocks.get("catalog")?.content).toContain("shellrun")
+  })
+
+  test("a key present in any turn is valid even when absent from an earlier turn", () => {
+    const result = breakdown(fixture, { content: ["system.catalog:github"] })
+    expect(result.sessions[0].turns[0].system.blocks.find((block) => block.key === "mcp:github")?.content).toBeUndefined()
+    expect(result.sessions[0].turns[1].system.blocks.find((block) => block.key === "catalog:github")?.content).toBeDefined()
+  })
+
+  test("unknown keys fail loudly, listing the available vocabulary (R00-010)", () => {
+    expect(() => breakdown(fixture, { content: ["system.nope"] })).toThrow(/system\.nope/)
+    expect(() => breakdown(fixture, { content: ["history.9"] })).toThrow(/history\.9/)
+  })
+
+  test("malformed keys fail loudly", () => {
+    expect(() => breakdown(fixture, { content: ["history.x"] })).toThrow()
+    expect(() => breakdown(fixture, { content: ["nope.key"] })).toThrow()
+  })
+})
+
+describe("breakdown CLI (R10-006 human mode, ticket 25)", () => {
+  const cap = (file: CaptureFile) => ({ sessionID: file.meta.sessionID, seq: 0, file })
+
+  const writeRun = async (
+    dir: string,
+    input: {
+      captures: { sessionID: string; seq: number; file: CaptureFile }[]
+      parts?: { sessionID: string; data: Record<string, unknown> }[]
+    },
+  ) => {
+    await Bun.write(path.join(dir, "manifest.json"), JSON.stringify(manifest))
+    const dbPath = path.join(dir, manifest.dbPath)
+    await fs.mkdir(path.dirname(dbPath), { recursive: true })
+    const db = new Database(dbPath)
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY)")
+    db.exec("CREATE TABLE part (session_id TEXT, data TEXT)")
+    for (const id of ["ses_a", "ses_b"]) db.run("INSERT INTO session (id) VALUES (?)", [id])
+    for (const part of input.parts ?? [])
+      db.run("INSERT INTO part (session_id, data) VALUES (?, ?)", [part.sessionID, JSON.stringify(part.data)])
+    db.close()
+    for (const entry of input.captures) {
+      const capturesDir = path.join(dir, manifest.capturesDir ?? "", entry.sessionID)
+      await fs.mkdir(capturesDir, { recursive: true })
+      await Bun.write(path.join(capturesDir, `${String(entry.seq).padStart(4, "0")}.json`), JSON.stringify(entry.file))
+    }
+  }
+
+  const captureStdout = async (run: () => Promise<number>) => {
+    const chunks: string[] = []
+    const write = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      chunks.push(String(chunk))
+      return true
+    })
+    try {
+      return { code: await run(), stdout: chunks.join("") }
+    } finally {
+      write.mockRestore()
+    }
+  }
+
+  test("invalid run dir exits non-zero with a message (R00-010)", async () => {
+    const log = spyOn(console, "error")
+    try {
+      expect(await main(["/nonexistent/run/dir"])).toBe(1)
+      expect(log).toHaveBeenCalled()
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  test("JSON emit is counts-only and matches the pure core", async () => {
+    await using tmp = await tmpdir()
+    await writeRun(tmp.path, { captures: [cap(captureA0), cap(captureB0)] })
+    const { code, stdout } = await captureStdout(() => main([tmp.path]))
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdout)
+    expect(parsed.schema).toBe(1)
+    expect(JSON.stringify(parsed)).not.toContain('"content"')
+    const core = breakdown({ manifest, captures: [record(captureA0), record(captureB0)], usage: [] })
+    expect(parsed.sessions).toEqual(core.sessions)
+  })
+
+  test("--human renders a stdout projection (counts + % of inputEstimate)", async () => {
+    await using tmp = await tmpdir()
+    await writeRun(tmp.path, { captures: [cap(captureA0)] })
+    const { code, stdout } = await captureStdout(() => main([tmp.path, "--human"]))
+    expect(code).toBe(0)
+    expect(stdout).toContain("session ses_a")
+    expect(stdout).toContain("turn 0")
+    expect(stdout).toContain("base")
+    expect(stdout).toContain("%")
+  })
+
+  test("--human combined with --content is rejected loudly (R00-010)", async () => {
+    const log = spyOn(console, "error")
+    try {
+      expect(await main(["/nonexistent/run/dir", "--human", "--content", "system.base"])).toBe(1)
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("--human"))
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  test("--session/--turn filter sessions/turns and recompute totals", async () => {
+    await using tmp = await tmpdir()
+    await writeRun(tmp.path, {
+      captures: [cap(captureA0), { sessionID: "ses_a", seq: 1, file: captureA1 }, cap(captureB0)],
+      parts: [
+        { sessionID: "ses_a", data: { type: "step-finish", tokens: { input: 1000, output: 77, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.01 } },
+        { sessionID: "ses_b", data: { type: "step-finish", tokens: { input: 500, output: 20, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.005 } },
+      ],
+    })
+    const out = path.join(tmp.path, "out.json")
+    expect(await main([tmp.path, "--session", "ses_b", "-o", out])).toBe(0)
+    const filtered: Breakdown = JSON.parse(await Bun.file(out).text())
+    expect(filtered.sessions.map((session) => session.sessionID)).toEqual(["ses_b"])
+    expect(filtered.totals.inputReported).toBe(500)
+    expect(filtered.totals.output).toBe(20)
+    const out2 = path.join(tmp.path, "out2.json")
+    expect(await main([tmp.path, "--turn", "1", "-o", out2])).toBe(0)
+    const turnFiltered: Breakdown = JSON.parse(await Bun.file(out2).text())
+    expect(turnFiltered.sessions.map((session) => session.sessionID)).toEqual(["ses_a"])
+    expect(turnFiltered.sessions[0].turns.map((turn) => turn.requestID)).toEqual(["msg_a1"])
   })
 })
