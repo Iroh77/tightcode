@@ -65,7 +65,7 @@ import { partDefaultOpen } from "./part-default-open"
 import { animate } from "motion"
 import { attached, inline, kind, typeLabel } from "./message-file"
 import { readPartText } from "./message-part-text"
-import { deferredToolName } from "./deferred-tool-display"
+import { deferredToolInput, deferredToolName } from "./deferred-tool-display"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
 
 async function writeClipboard(text: string): Promise<boolean> {
@@ -1540,11 +1540,6 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
   const data = useData()
   const i18n = useI18n()
   const part = () => props.part as ToolPart
-  if (part().tool === "todowrite") return null
-
-  const hideQuestion = createMemo(
-    () => part().tool === "question" && (part().state.status === "pending" || part().state.status === "running"),
-  )
 
   const emptyInput: Record<string, any> = {}
   const emptyMetadata: Record<string, any> = {}
@@ -1552,23 +1547,49 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
   const input = () => part().state?.input ?? emptyInput
   // @ts-expect-error
   const partMetadata = () => part().state?.metadata ?? emptyMetadata
+  // R12-012 Amendment 1: deferred_tool parts present under the inner tool's
+  // name once the running update delivers the unwrap metadata (pending keeps
+  // the wrapper label).
+  const toolName = () => deferredToolName(part().tool, partMetadata())
+  // Parsed once, shared by innerInput and render — undefined means the
+  // wrapper args are unparseable (degradation tier 2).
+  const deferredArgs = createMemo(() =>
+    part().tool === "deferred_tool" ? deferredToolInput(input()) : undefined,
+  )
+  const innerInput = createMemo(() => deferredArgs() ?? input())
+
+  if (toolName() === "todowrite") return null
+
+  const hideQuestion = createMemo(
+    () => toolName() === "question" && (part().state.status === "pending" || part().state.status === "running"),
+  )
   const taskId = createMemo(() => {
-    if (part().tool !== "task") return
+    if (toolName() !== "task") return
     const value = partMetadata().sessionId
     if (typeof value === "string" && value) return value
   })
   const taskHref = createMemo(() => {
-    if (part().tool !== "task") return
+    if (toolName() !== "task") return
     return sessionLink(taskId(), data.sessionHref)
   })
   const taskSubtitle = createMemo(() => {
-    if (part().tool !== "task") return undefined
-    const value = input().description
+    if (toolName() !== "task") return undefined
+    const value = innerInput().description
     if (typeof value === "string" && value) return value
     return taskId()
   })
 
-  const render = createMemo(() => ToolRegistry.render(part().tool) ?? GenericTool)
+  // R12-012 Amendment 1: dispatch on the inner tool's name; degrade to the
+  // generic renderer when the wrapper args are unparseable while metadata is
+  // present (non-pending) — a dedicated renderer fed the wrapper envelope
+  // would render empty paths/strings. Pending falls out naturally: no
+  // metadata means the name stays "deferred_tool", which is unregistered.
+  const render = createMemo(() => {
+    if (part().tool === "deferred_tool" && part().state.status !== "pending" && deferredArgs() === undefined) {
+      return GenericTool
+    }
+    return ToolRegistry.render(toolName()) ?? GenericTool
+  })
   const controlledOpen = () => (props.onToolOpenChange ? (props.toolOpen ?? props.defaultOpen) : undefined)
   const handleToolOpenChange = (open: boolean) => props.onToolOpenChange?.(open)
 
@@ -1579,7 +1600,7 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
           <Match when={part().state.status === "error" && (part().state as any).error}>
             {(error) => {
               const cleaned = error().replace("Error: ", "")
-              if (part().tool === "question" && cleaned.includes("dismissed this question")) {
+              if (toolName() === "question" && cleaned.includes("dismissed this question")) {
                 return (
                   <div style="width: 100%; display: flex; justify-content: flex-end;">
                     <span class="text-13-regular text-text-weak cursor-default">
@@ -1590,7 +1611,7 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
               }
               return (
                 <ToolErrorCard
-                  tool={deferredToolName(part().tool, partMetadata())}
+                  tool={toolName()}
                   error={error()}
                   title={
                     part().tool === "websearch" ? webSearchProviderLabel(partMetadata().provider, i18n) : undefined
@@ -1615,10 +1636,8 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
           <Match when={true}>
             <Dynamic
               component={render()}
-              input={input()}
-              // R12-012: wrapper calls label under the inner tool's name
-              // (renderer dispatch stays on part().tool — deferred_tool renders generic)
-              tool={deferredToolName(part().tool, partMetadata())}
+              input={innerInput()}
+              tool={toolName()}
               sessionID={part().sessionID}
               metadata={partMetadata()}
               // @ts-expect-error
