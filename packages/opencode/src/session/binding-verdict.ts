@@ -27,14 +27,21 @@ export type ProbeEvidence =
   | { kind: "no-tool-call" }
   | { kind: "failure"; class: "timeout" | "transport" | "unparseable" }
 
+// R12-010 Amendment 4: evidence a learned advisory flip rests on — the
+// violating tool and its verbatim emitted arguments (capped), the flip's
+// offline-forensics trail. Distinct from ProbeEvidence: a learned entry never
+// carries probe evidence and vice versa.
+export type ViolationEvidence = { kind: "violation"; tool: string; args: string }
+
 // R12-013: how the verdict was reached — the originating cascade source,
 // preserved through in-memory propagation (a memo hit reports the origin that
 // populated it, never "memo"). Cache provenance carries the entry's source and
-// timestamp, plus its evidence when the entry carries one.
+// timestamp, plus its evidence when the entry carries one (probe evidence on
+// probe-written entries, violation evidence on learned ones).
 export type VerdictProvenance =
   | { origin: "pin" }
   | { origin: "static-table" }
-  | { origin: "cache"; source: "probe" | "learned"; timestamp: number; evidence?: ProbeEvidence }
+  | { origin: "cache"; source: "probe" | "learned"; timestamp: number; evidence?: ProbeEvidence | ViolationEvidence }
   | { origin: "probe"; evidence: ProbeEvidence }
   | { origin: "default" }
 
@@ -51,7 +58,7 @@ export type Options = {
 
 export interface Interface {
   readonly resolve: (input: Target) => Effect.Effect<ResolvedVerdict>
-  readonly observe: (input: Target & { reason: "schema-violation" }) => Effect.Effect<void>
+  readonly observe: (input: Target & { reason: "schema-violation"; tool: string; args: unknown }) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/BindingVerdict") {}
@@ -89,9 +96,10 @@ export const classifyProbeResponse = (input: unknown): Verdict | undefined => {
   return Object.keys(input).length === 0 ? "binding" : "advisory"
 }
 
-// R12-013: evidence is the verbatim emitted arguments JSON, bounded so a
-// pathological call cannot bloat the cache file.
-const PROBE_EVIDENCE_MAX_CHARS = 2048
+// R12-013 + Amendment 4: evidence carries the verbatim emitted arguments JSON
+// (probe decoy or violating tool call), bounded so a pathological call cannot
+// bloat the cache file.
+const EVIDENCE_MAX_CHARS = 2048
 
 // R12-013: the probe's answer becomes evidence — a missing call and unparseable
 // arguments are their own classes, a record call carries its verbatim args
@@ -103,7 +111,7 @@ export const probeOutcomeFromCall = (call: { input: unknown } | undefined): Prob
   if (verdict === undefined) return { verdict: "binding", evidence: { kind: "failure", class: "unparseable" } }
   return {
     verdict,
-    evidence: { kind: "call", args: JSON.stringify(call.input ?? {}).slice(0, PROBE_EVIDENCE_MAX_CHARS) },
+    evidence: { kind: "call", args: JSON.stringify(call.input ?? {}).slice(0, EVIDENCE_MAX_CHARS) },
   }
 }
 
@@ -198,11 +206,17 @@ const ProbeEvidenceSchema = Schema.Union([
   }),
 ])
 
+const ViolationEvidenceSchema = Schema.Struct({
+  kind: Schema.Literal("violation"),
+  tool: Schema.String,
+  args: Schema.String,
+})
+
 const CacheEntry = Schema.Struct({
   verdict: Schema.Literals(["binding", "advisory"]),
   source: Schema.Literals(["probe", "learned"]),
   timestamp: Schema.Number,
-  evidence: Schema.optional(ProbeEvidenceSchema),
+  evidence: Schema.optional(Schema.Union([ProbeEvidenceSchema, ViolationEvidenceSchema])),
 })
 
 type CacheEntry = Schema.Schema.Type<typeof CacheEntry>
@@ -346,22 +360,41 @@ export const layerWith = (options: Options = {}) =>
         return resolved
       })
 
-      const observe = Effect.fn("BindingVerdict.observe")(function* (input: Target & { reason: "schema-violation" }) {
-        const key = cacheKey(input)
-        const current = (yield* readCache())[key]
-        if (current?.verdict === "advisory") return
-        const now = yield* DateTime.nowAsDate
-        const timestamp = now.getTime()
-        yield* writeEntry(key, { verdict: "advisory", source: "learned", timestamp })
-        // Learning reaches future sessions of the same process: the next
-        // resolve re-reads the cache instead of serving the memoized binding.
-        // On a cache write failure the memoized verdict stands. The memoized
-        // provenance mirrors the entry's (cache, learned, R12-013).
-        ;(yield* InstanceState.get(state)).set(key, {
-          verdict: "advisory",
-          provenance: { origin: "cache", source: "learned", timestamp },
-        })
-      })
+      // R12-010 Amendment 4: the learning rule is gated upstream — the caller
+      // (SessionTools) feeds observe only when the resolved verdict was
+      // binding and the wrapper served no schema for the tool, the one shape
+      // where a violation proves non-enforcement rather than a model slip
+      // (schema-eager serving) or the serving shape itself (advisory
+      // serving — the self-sealing loop that poisoned the 2026-09-16 cache).
+      // Every accepted flip is logged loudly and persisted with its evidence.
+      const observe = Effect.fn("BindingVerdict.observe")(
+        function* (input: Target & { reason: "schema-violation"; tool: string; args: unknown }) {
+          const key = cacheKey(input)
+          const current = (yield* readCache())[key]
+          if (current?.verdict === "advisory") return
+          const now = yield* DateTime.nowAsDate
+          const timestamp = now.getTime()
+          const evidence: ViolationEvidence = {
+            kind: "violation",
+            tool: input.tool,
+            args: JSON.stringify(input.args ?? {}).slice(0, EVIDENCE_MAX_CHARS),
+          }
+          yield* Effect.logWarning("binding verdict learned advisory from a schema violation", {
+            key,
+            tool: evidence.tool,
+            args: evidence.args,
+          })
+          yield* writeEntry(key, { verdict: "advisory", source: "learned", timestamp, evidence })
+          // Learning reaches future sessions of the same process: the next
+          // resolve re-reads the cache instead of serving the memoized binding.
+          // On a cache write failure the memoized verdict stands. The memoized
+          // provenance mirrors the entry's (cache, learned, R12-013).
+          ;(yield* InstanceState.get(state)).set(key, {
+            verdict: "advisory",
+            provenance: { origin: "cache", source: "learned", timestamp, evidence },
+          })
+        },
+      )
 
       return Service.of({ resolve, observe })
     }),

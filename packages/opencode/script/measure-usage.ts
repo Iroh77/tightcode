@@ -30,6 +30,13 @@ const ProbeEvidenceSchema = Schema.Union([
   }),
 ])
 
+// R12-010 Amendment 4: learned advisory flips persist violation evidence.
+const ViolationEvidenceSchema = Schema.Struct({
+  kind: Schema.Literal("violation"),
+  tool: Schema.String,
+  args: Schema.String,
+})
+
 const VerdictProvenanceSchema = Schema.Union([
   Schema.Struct({ origin: Schema.Literal("pin") }),
   Schema.Struct({ origin: Schema.Literal("static-table") }),
@@ -37,7 +44,7 @@ const VerdictProvenanceSchema = Schema.Union([
     origin: Schema.Literal("cache"),
     source: Schema.Literals(["probe", "learned"]),
     timestamp: Schema.Number,
-    evidence: Schema.optional(ProbeEvidenceSchema),
+    evidence: Schema.optional(Schema.Union([ProbeEvidenceSchema, ViolationEvidenceSchema])),
   }),
   Schema.Struct({ origin: Schema.Literal("probe"), evidence: ProbeEvidenceSchema }),
   Schema.Struct({ origin: Schema.Literal("default") }),

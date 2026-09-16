@@ -221,14 +221,26 @@ describe("session.binding-verdict", () => {
     ),
   )
 
-  it.instance("observe flips binding to advisory for future sessions", () =>
+  it.instance("observe flips binding to advisory with the violation logged and persisted as evidence", () =>
     withService({ probe: countingProbe(() => undefined).probe }, (svc, directory) =>
       Effect.gen(function* () {
         expect((yield* svc.resolve({ model, provider: info() })).verdict).toBe("binding")
-        yield* svc.observe({ model, provider: info(), reason: "schema-violation" })
+        yield* svc.observe({ model, provider: info(), reason: "schema-violation", tool: "write", args: {} })
         const learned = yield* svc.resolve({ model, provider: info() })
         expect(learned.verdict).toBe("advisory")
-        expect(learned.provenance).toEqual({ origin: "cache", source: "learned", timestamp: expect.any(Number) })
+        expect(learned.provenance).toEqual({
+          origin: "cache",
+          source: "learned",
+          timestamp: expect.any(Number),
+          evidence: { kind: "violation", tool: "write", args: "{}" },
+        })
+        const raw = JSON.parse(yield* Effect.promise(() => Bun.file(path.join(directory, CACHE_FILE)).text()))
+        expect(raw[key()].source).toBe("learned")
+        expect(raw[key()].evidence).toEqual({ kind: "violation", tool: "write", args: "{}" })
+        const logs = yield* logLines
+        expect(
+          logs.some((line) => typeof line === "string" && line.includes("learned advisory from a schema violation")),
+        ).toBe(true)
         const fresh = yield* BindingVerdict.Service.use((fresh) => fresh.resolve({ model, provider: info() })).pipe(
           Effect.provide(layer({ probe: () => Effect.die(new Error("probe must not run")) }, directory)),
         )
@@ -242,7 +254,7 @@ describe("session.binding-verdict", () => {
       Effect.gen(function* () {
         const seeded = { [key()]: { verdict: "advisory", source: "learned", timestamp: 123 } }
         yield* Effect.promise(() => Bun.write(path.join(directory, CACHE_FILE), JSON.stringify(seeded)))
-        yield* svc.observe({ model, provider: info(), reason: "schema-violation" })
+        yield* svc.observe({ model, provider: info(), reason: "schema-violation", tool: "write", args: {} })
         expect(JSON.parse(yield* Effect.promise(() => Bun.file(path.join(directory, CACHE_FILE)).text()))).toEqual(seeded)
       }),
     ),
@@ -251,10 +263,28 @@ describe("session.binding-verdict", () => {
   it.instance("observe records advisory when no entry exists", () =>
     withService({}, (svc, directory) =>
       Effect.gen(function* () {
-        yield* svc.observe({ model, provider: info(), reason: "schema-violation" })
+        yield* svc.observe({ model, provider: info(), reason: "schema-violation", tool: "write", args: {} })
         const raw = JSON.parse(yield* Effect.promise(() => Bun.file(path.join(directory, CACHE_FILE)).text()))
         expect(raw[key()].verdict).toBe("advisory")
         expect(raw[key()].source).toBe("learned")
+        expect(raw[key()].evidence).toEqual({ kind: "violation", tool: "write", args: "{}" })
+      }),
+    ),
+  )
+
+  it.instance("learned evidence args are capped at 2048 chars", () =>
+    withService({}, (svc, directory) =>
+      Effect.gen(function* () {
+        yield* svc.observe({
+          model,
+          provider: info(),
+          reason: "schema-violation",
+          tool: "write",
+          args: { content: "x".repeat(3000) },
+        })
+        const raw = JSON.parse(yield* Effect.promise(() => Bun.file(path.join(directory, CACHE_FILE)).text()))
+        expect(raw[key()].evidence.args.length).toBe(2048)
+        expect(raw[key()].evidence.args.startsWith('{"content":"xx')).toBe(true)
       }),
     ),
   )
@@ -334,7 +364,7 @@ describe("session.binding-verdict", () => {
       withService({ pin: "binding", probe: () => Effect.die(new Error("probe must not run")) }, (svc, directory) =>
         Effect.gen(function* () {
           expect((yield* svc.resolve({ model, provider: info() })).verdict).toBe("binding")
-          yield* svc.observe({ model, provider: info(), reason: "schema-violation" })
+          yield* svc.observe({ model, provider: info(), reason: "schema-violation", tool: "write", args: {} })
           const raw = JSON.parse(yield* Effect.promise(() => Bun.file(path.join(directory, CACHE_FILE)).text()))
           expect(raw[key()].verdict).toBe("advisory")
           expect(raw[key()].source).toBe("learned")

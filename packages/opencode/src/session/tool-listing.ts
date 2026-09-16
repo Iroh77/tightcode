@@ -178,6 +178,55 @@ function validate(universe: UniverseTool[]) {
 // this module.
 type UpdateToolCall = SessionProcessor.Handle["updateToolCall"]
 
+// The ai-sdk may begin executing the tool before the processor has consumed
+// the stream's "tool-call" part, so the part can still be pending when the
+// fallback marker writes — and the pending→running transition rebuilds the
+// state, dropping the write (same race deferred_tool.ts documents). The
+// observe hop used to mask this by accident; the Amendment 4 gate removed it,
+// so the write now waits for the running part explicitly. The marker must
+// land while the part is running — failToolCall preserves running metadata
+// into the error state. Bounded; a settled part or an exhausted wait logs.
+const METADATA_ATTEMPTS = 100
+const METADATA_DELAY_MS = 5
+
+const writeMarkerWhenRunning = async (
+  input: { run: EffectBridge.Shape; updateToolCall: UpdateToolCall; seed: ToolSeed },
+  callID: string,
+) => {
+  for (let attempt = 0; attempt < METADATA_ATTEMPTS; attempt++) {
+    const part = await input.run.promise(
+      input.updateToolCall(callID, (part) => {
+        if (part.state.status !== "running") return part
+        return {
+          ...part,
+          state: {
+            ...part.state,
+            metadata: { ...part.state.metadata, load_tool: { tools: [input.seed.name] } },
+          },
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("tool fallback could not set the delivery marker", {
+            tool: input.seed.name,
+            callID,
+            cause,
+          }).pipe(Effect.as(undefined)),
+        ),
+      ),
+    )
+    if (!part) break
+    if (part.state.status === "running") return
+    if (part.state.status !== "pending") break
+    await Bun.sleep(METADATA_DELAY_MS)
+  }
+  await input.run.promise(
+    Effect.logWarning("tool fallback marker did not reach the running part", {
+      tool: input.seed.name,
+      callID,
+    }),
+  )
+}
+
 // Shared schema-in-error block: the direct-call fallback (R12-006) and the
 // deferred_tool dispatch (R12-012) append the same round-1 format.
 export const schemaBlock = (seed: ToolSeed) =>
@@ -188,16 +237,17 @@ export const schemaBlock = (seed: ToolSeed) =>
 // schema rides the error output and the part is marked loaded, so recovery is
 // protocol-level rather than willingness-level. Permission denials and aborts
 // are not arg-shape failures and stay upstream (R12-001 enforcement unchanged).
-// A schema-validation failure additionally feeds BindingVerdict.observe:
-// grammar-enforced serving cannot produce one, so the signal is proof of
-// advisory — future sessions only, independent of the load state.
+// A schema-validation failure feeds BindingVerdict.observe when the caller
+// passed one (R12-010 Amendment 4: only informative sessions — wrapper-active
+// binding — wire it; the factory receives the failing args for the evidence
+// digest). Future sessions only, independent of the load state.
 export const withFallback = (
   input: {
     seed: ToolSeed
     messages: SessionV1.WithParts[]
     run: EffectBridge.Shape
     updateToolCall: UpdateToolCall
-    observe: Effect.Effect<void>
+    observe?: (args: unknown) => Effect.Effect<void>
   },
   execute: (args: unknown, options: ToolExecutionOptions) => Promise<unknown>,
 ): ((args: unknown, options: ToolExecutionOptions) => Promise<unknown>) =>
@@ -212,35 +262,12 @@ export const withFallback = (
         error instanceof PermissionV1.CorrectedError
       )
         throw error
-      if (error instanceof Tool.InvalidArgumentsError) await input.run.promise(input.observe)
+      if (error instanceof Tool.InvalidArgumentsError && input.observe !== undefined)
+        await input.run.promise(input.observe(args))
       // Repeat failures stay quiet: the marker re-opens only when the model no
       // longer sees the part that delivered the full content.
       if (delivered(input.seed.name, input.messages)) throw error
-      // The marker must land while the part is still running — failToolCall
-      // preserves running metadata into the error state.
-      await input.run.promise(
-        input
-          .updateToolCall(options.toolCallId, (part) => {
-            if (part.state.status !== "running") return part
-            return {
-              ...part,
-              state: {
-                ...part.state,
-                metadata: { ...part.state.metadata, load_tool: { tools: [input.seed.name] } },
-              },
-            }
-          })
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("tool fallback could not set the delivery marker", {
-                tool: input.seed.name,
-                callID: options.toolCallId,
-                cause,
-              }),
-            ),
-            Effect.asVoid,
-          ),
-      )
+      await writeMarkerWhenRunning(input, options.toolCallId)
       throw new Error(`${errorMessage(error)}\n\n${schemaBlock(input.seed)}`)
     }
   }

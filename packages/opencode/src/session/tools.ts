@@ -555,7 +555,6 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
   })
   const listing = new Map(ToolListing.render(seeds, verdict, wrapperActive).map((entry) => [entry.name, entry]))
-  const observe = bindingVerdict.observe({ model: input.model, provider: providerInfo, reason: "schema-violation" })
   const seedsByName = new Map(seeds.map((seed) => [seed.name, seed]))
   const shaped = Object.fromEntries(
     Object.entries(tools).map(([name, entry]) => {
@@ -570,6 +569,13 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       // on wrapper sessions the deferred view is omitted (the payload drops
       // the entry) but the wrapped closure remains deferred_tool's dispatch
       // target (decision tool-lazy-loading-04 §4).
+      // R12-010 Amendment 4: a violation is informative only on wrapper-active
+      // binding sessions — the only shape where no schema was served for the
+      // tool and the resolved verdict claims enforcement, so args violating
+      // the registered schema prove non-enforcement. Schema-eager serving can
+      // receive a model arg slip; advisory serving guarantees the violation
+      // (the self-sealing loop that poisoned the 2026-09-16 cache). Gated
+      // sessions pass no observe at all.
       const wrapped =
         seed.kind === "deferred"
           ? {
@@ -579,7 +585,17 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                   messages: input.messages,
                   run,
                   updateToolCall: input.processor.updateToolCall,
-                  observe,
+                  observe:
+                    wrapperActive === false
+                      ? undefined
+                      : (args: unknown) =>
+                          bindingVerdict.observe({
+                            model: input.model,
+                            provider: providerInfo,
+                            reason: "schema-violation",
+                            tool: seed.name,
+                            args,
+                          }),
                 },
                 entry.execute,
               ),

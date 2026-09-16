@@ -452,22 +452,24 @@ describe("session.tools direct-call fallback (ticket 07)", () => {
       ),
     )
 
-  itFallback.effect("a failed deferred call appends the schema, marks the part and observes the verdict", () =>
-    Effect.gen(function* () {
-      observed.length = 0
-      const state = runningGlobPart()
-      const resolved = yield* SessionTools.resolve(failingResolveInput(state))
+  itFallback.effect(
+    "a failed deferred call appends the schema and marks the part; an advisory-resolved session feeds no observe (Amendment 4)",
+    () =>
+      Effect.gen(function* () {
+        observed.length = 0
+        const state = runningGlobPart()
+        const resolved = yield* SessionTools.resolve(failingResolveInput(state))
 
-      const execute = resolved.tools.glob.execute
-      if (!execute) throw new Error("glob is missing execute")
-      const rejection = yield* rethrown(execute)
-      expect(rejection).toBeInstanceOf(Error)
-      expect((rejection as Error).message).toContain("missing pattern")
-      expect((rejection as Error).message).toContain(JSON.stringify(globSchema, null, 2))
-      if (state.state.status !== "running") throw new Error("part should still be running")
-      expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
-      expect(observed).toEqual(["schema-violation"])
-    }),
+        const execute = resolved.tools.glob.execute
+        if (!execute) throw new Error("glob is missing execute")
+        const rejection = yield* rethrown(execute)
+        expect(rejection).toBeInstanceOf(Error)
+        expect((rejection as Error).message).toContain("missing pattern")
+        expect((rejection as Error).message).toContain(JSON.stringify(globSchema, null, 2))
+        if (state.state.status !== "running") throw new Error("part should still be running")
+        expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
+        expect(observed).toEqual([])
+      }),
   )
 
   itOff.effect("kill-switch: a failed deferred call stays upstream — no schema append, no marker, no observe", () =>
@@ -530,9 +532,9 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
     BindingVerdict.Service,
     BindingVerdict.Service.of({
       resolve: () => Effect.succeed({ verdict: "binding" as Verdict, provenance: { origin: "static-table" as const } }),
-      observe: () =>
+      observe: (input) =>
         Effect.sync(() => {
-          observed.push("schema-violation")
+          observed.push(input.tool)
         }),
     }),
   )
@@ -549,6 +551,13 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
     Layer.mergeAll(
       baseLayer({ flags: { disableToolWrapper: true }, registry: okGlob }),
       verdictStub("binding"),
+      providerStub,
+    ),
+  )
+  const itSchemaEagerFailing = testEffect(
+    Layer.mergeAll(
+      baseLayer({ flags: { disableToolWrapper: true }, registry: failingGlob }),
+      verdictObserve,
       providerStub,
     ),
   )
@@ -706,7 +715,22 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
       if (state.state.status !== "running") throw new Error("part should still be running")
       expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
       expect(state.state.metadata?.deferred_tool).toEqual({ tool: "glob" })
-      expect(observed).toEqual(["schema-violation"])
+      expect(observed).toEqual(["glob"])
+    }),
+  )
+
+  itSchemaEagerFailing.effect("wrapper kill-switch (schema-eager binding): a failed deferred call feeds no observe", () =>
+    Effect.gen(function* () {
+      observed.length = 0
+      const state = metaPart()
+      const resolved = yield* SessionTools.resolve(resolveInput(state))
+      const meta = resolved.tools.deferred_tool
+      expect(meta).toBeUndefined()
+      const execute = resolved.tools.glob.execute
+      if (!execute) throw new Error("glob is missing execute")
+      const rejection = yield* rejectionOf(execute, { pattern: "*" })
+      expect((rejection as Error).message).toContain(JSON.stringify(globSchema, null, 2))
+      expect(observed).toEqual([])
     }),
   )
 

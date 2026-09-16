@@ -489,6 +489,8 @@ describe("session.tool-listing withFallback (R12-006)", () => {
     messages?: SessionV1.WithParts[]
     part?: SessionV1.ToolPart
     execute: (args: unknown, options: ToolExecutionOptions) => Promise<unknown>
+    observe?: (args: unknown) => Effect.Effect<void>
+    noObserve?: boolean
   }) => {
     const observed: string[] = []
     const marked: SessionV1.ToolPart[] = []
@@ -508,7 +510,10 @@ describe("session.tool-listing withFallback (R12-006)", () => {
             marked.push(current)
             return current
           }),
-        observe: Effect.sync(() => observed.push("schema-violation")),
+        observe:
+          input.noObserve === true
+            ? undefined
+            : (input.observe ?? ((args) => Effect.sync(() => observed.push(JSON.stringify(args))))),
       },
       input.execute,
     )
@@ -589,7 +594,7 @@ describe("session.tool-listing withFallback (R12-006)", () => {
 
     const error = await rejection(h.wrapped({}, options()))
 
-    expect(h.observed).toEqual(["schema-violation"])
+    expect(h.observed).toEqual(["{}"])
     expect(error).toBeInstanceOf(Tool.InvalidArgumentsError)
     expect(h.current()).toEqual(before)
     expect(h.marked).toEqual([])
@@ -603,12 +608,29 @@ describe("session.tool-listing withFallback (R12-006)", () => {
 
     const error = await rejection(h.wrapped({}, options()))
 
-    expect(h.observed).toEqual(["schema-violation"])
+    expect(h.observed).toEqual(["{}"])
     expect((error as Error).message).toContain("missing pattern")
     expect((error as Error).message).toContain(JSON.stringify(schema("glob"), null, 2))
     const marked = h.current()?.state
     if (marked?.status !== "running") throw new Error("part should still be running")
     expect(marked.metadata?.load_tool).toEqual({ tools: ["glob"] })
+  })
+
+  test("no observe wired: the invalid-arguments failure stays upstream-shaped, nothing observed", async () => {
+    const h = harness({
+      part: runningPart(),
+      execute: async () => { throw new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" }) },
+      noObserve: true,
+    })
+
+    const error = await rejection(h.wrapped({ pattern: "*" }, options()))
+
+    expect((error as Error).message).toContain("missing pattern")
+    expect((error as Error).message).toContain(JSON.stringify(schema("glob"), null, 2))
+    expect(h.observed).toEqual([])
+    const state = h.current()?.state
+    if (state?.status !== "running") throw new Error("part should still be running")
+    expect(state.metadata?.load_tool).toEqual({ tools: ["glob"] })
   })
 
   test("the marker only lands on a running part", async () => {
