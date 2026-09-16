@@ -524,7 +524,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   // Kill-switch (SC-3): upstream per-turn shapes pass through, no verdict is
   // resolved, the freeze never sees seeds (R00-013 — flag set is
   // upstream-identical). `wrapper` stays absent on this path.
-  if (flags.disableLazyTools) return { tools, seeds: [], verdict: undefined }
+  if (flags.disableLazyTools) return { tools, seeds: [], verdict: undefined, verdictProvenance: undefined }
 
   const bindingVerdict = yield* BindingVerdict.Service
   const providerService = yield* Provider.Service
@@ -532,7 +532,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   // request (R12-010), scoped to the same (provider, model, endpoint) tuple
   // the prompt base is frozen against; BindingVerdict memoizes per key.
   const providerInfo = yield* providerService.getProvider(input.model.providerID)
-  const verdict = yield* bindingVerdict.resolve({ model: input.model, provider: providerInfo })
+  const { verdict, provenance } = yield* bindingVerdict.resolve({ model: input.model, provider: providerInfo })
   // R12-012: the wrapper activates only on binding sessions without its
   // kill-switch (disableLazyTools already early-returned above). It is env
   // —stable per session: the resolved pair (verdict, wrapper) is what the
@@ -608,7 +608,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       inputSchema: jsonSchema(DEFERRED_TOOL_SCHEMA),
       execute: dispatch({ seeds, shaped, run, updateToolCall: input.processor.updateToolCall }),
     })
-  return { tools: shaped, seeds, verdict, wrapper: wrapperActive }
+  return { tools: shaped, seeds, verdict, verdictProvenance: provenance, wrapper: wrapperActive }
 })
 
 function toRecord(value: unknown) {

@@ -10,6 +10,7 @@ import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
 import { ToolListing, type FrozenToolEntry, type ToolSeed, type Verdict } from "@/session/tool-listing"
+import type { VerdictProvenance } from "@/session/binding-verdict"
 import { PromptBase } from "./prompt-base"
 import type { SystemBlock } from "./prompt-base"
 import { PromptCapture } from "./prompt-capture"
@@ -37,6 +38,9 @@ type PrepareInput = {
   readonly tools: Record<string, Tool>
   readonly toolSeeds?: ToolSeed[]
   readonly toolVerdict?: Verdict
+  // R12-013: how the verdict was reached, threaded next to toolVerdict;
+  // captured as meta.verdictProvenance (omitted when undefined).
+  readonly toolVerdictProvenance?: VerdictProvenance
   // The R12-012 wrapper axis resolved at SessionTools.resolve; frozen next to
   // the mode at the first write. Missing = round-1 semantics (false).
   readonly toolWrapper?: boolean
@@ -364,7 +368,10 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         // Harness v2 self-identification (R13-003/005): absent, not null —
         // verdict only when the lazy branch ran (kill-switch turns leave the
         // stream input undefined); binary is a plain identifier (R10-002-safe).
+        // R12-013: the verdict's provenance rides next to it, same omission
+        // rule.
         ...(input.toolVerdict ? { verdict: input.toolVerdict } : {}),
+        ...(input.toolVerdictProvenance ? { verdictProvenance: input.toolVerdictProvenance } : {}),
         binary: InstallationVersion,
       },
     })

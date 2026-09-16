@@ -172,7 +172,11 @@ const makeEnv = (probe?: BindingVerdict.Probe, flags?: Partial<RuntimeFlags.Info
   return LayerNode.compile(root, replacements)
 }
 
-const advisory = testEffect(makeEnv(() => Effect.succeed("advisory")))
+const advisoryProbe = (): BindingVerdict.ProbeOutcome => ({
+  verdict: "advisory",
+  evidence: { kind: "call", args: '{"answer":4}' },
+})
+const advisory = testEffect(makeEnv(() => Effect.succeed(advisoryProbe())))
 const binding = testEffect(makeEnv(undefined, { disableToolWrapper: true }))
 
 const cfg = {

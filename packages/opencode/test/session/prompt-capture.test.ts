@@ -149,9 +149,17 @@ describe("session.prompt-capture.dump", () => {
     expect(JSON.stringify(withMap.payload.tools)).toBe(JSON.stringify(without.payload.tools))
   })
 
-  test("meta.verdict and meta.binary ride the file; undefined fields stay absent (SC-4, R13-003/005)", async () => {
+  test("meta.verdict, its provenance and meta.binary ride the file; undefined fields stay absent (SC-4, R13-003/005, R12-013)", async () => {
     await using tmp = await tmpdir()
-    await dumpTo(tmp.path, { prepared: prepared(), meta: { ...meta, verdict: "binding", binary: "opencode/1.2.3" } })
+    await dumpTo(tmp.path, {
+      prepared: prepared(),
+      meta: {
+        ...meta,
+        verdict: "binding",
+        verdictProvenance: { origin: "probe", evidence: { kind: "no-tool-call" } },
+        binary: "opencode/1.2.3",
+      },
+    })
     await dumpTo(tmp.path, { prepared: prepared(), meta })
     const withFields = await readFile(path.join(tmp.path, "prompt-captures", meta.sessionID, "0000.json")) as {
       meta: Record<string, unknown>
@@ -160,8 +168,10 @@ describe("session.prompt-capture.dump", () => {
       meta: Record<string, unknown>
     }
     expect(withFields.meta.verdict).toBe("binding")
+    expect(withFields.meta.verdictProvenance).toEqual({ origin: "probe", evidence: { kind: "no-tool-call" } })
     expect(withFields.meta.binary).toBe("opencode/1.2.3")
     expect("verdict" in without.meta).toBe(false)
+    expect("verdictProvenance" in without.meta).toBe(false)
     expect("binary" in without.meta).toBe(false)
   })
 

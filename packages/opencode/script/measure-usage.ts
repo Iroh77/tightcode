@@ -5,6 +5,7 @@ import { Schema } from "effect"
 import fs from "fs/promises"
 import path from "path"
 import type { CaptureFile } from "../src/session/llm/prompt-capture"
+import type { VerdictProvenance } from "../src/session/binding-verdict"
 import type { CampaignSchedule, CampaignSpec } from "./reference-workload"
 
 // Measurement script (R10-003/R10-004): offline transforms over a reference-workload
@@ -17,7 +18,31 @@ import type { CampaignSchedule, CampaignSpec } from "./reference-workload"
 // exact shape so report/diff inputs stay honest. Harness v2 (ticket 28) adds
 // the verdict/identity record as additive optional fields — the v2 driver
 // always writes them (null/[] when nothing to record), v1 manifests read as
-// null/[]. Contracts: ARCHITECTURE/detailed/comparison-testing.md.
+// null/[]. R12-013 (ticket 36) adds `verdictProvenances` the same way:
+// recorded, never gating (R13-003 gates on the verdict alone); old runs
+// without the field stay valid. Contracts: ARCHITECTURE/detailed/comparison-testing.md.
+const ProbeEvidenceSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("call"), args: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal("no-tool-call") }),
+  Schema.Struct({
+    kind: Schema.Literal("failure"),
+    class: Schema.Literals(["timeout", "transport", "unparseable"]),
+  }),
+])
+
+const VerdictProvenanceSchema = Schema.Union([
+  Schema.Struct({ origin: Schema.Literal("pin") }),
+  Schema.Struct({ origin: Schema.Literal("static-table") }),
+  Schema.Struct({
+    origin: Schema.Literal("cache"),
+    source: Schema.Literals(["probe", "learned"]),
+    timestamp: Schema.Number,
+    evidence: Schema.optional(ProbeEvidenceSchema),
+  }),
+  Schema.Struct({ origin: Schema.Literal("probe"), evidence: ProbeEvidenceSchema }),
+  Schema.Struct({ origin: Schema.Literal("default") }),
+])
+
 export const RunManifestSchema = Schema.Struct({
   bin: Schema.String,
   modelID: Schema.String,
@@ -31,6 +56,7 @@ export const RunManifestSchema = Schema.Struct({
   endedAt: Schema.String,
   pin: Schema.optional(Schema.NullOr(Schema.Literals(["binding", "advisory"]))),
   verdicts: Schema.optional(Schema.Array(Schema.Literals(["binding", "advisory"]))),
+  verdictProvenances: Schema.optional(Schema.Array(VerdictProvenanceSchema)),
   binary: Schema.optional(Schema.NullOr(Schema.String)),
 })
 
@@ -243,6 +269,22 @@ export const diff = (fork: UsageReport, upstream: UsageReport): DiffReport => {
 // observable; ≥2 = mixed (a finding, never averaged away).
 export const deriveVerdicts = (captureRecords: CaptureRecord[]): Array<"binding" | "advisory"> =>
   [...new Set(captureRecords.map((record) => record.capture.meta.verdict).filter((v) => v !== undefined))].sort()
+
+// R12-013 mirror of deriveVerdicts over meta.verdictProvenance: distinct
+// sorted JSON values. Manifest-only — never consumed by the gate.
+export const deriveVerdictProvenances = (captureRecords: CaptureRecord[]): VerdictProvenance[] => {
+  const byJson = new Map(
+    captureRecords.flatMap((record) =>
+      record.capture.meta.verdictProvenance === undefined
+        ? []
+        : [[JSON.stringify(record.capture.meta.verdictProvenance), record.capture.meta.verdictProvenance] as const],
+    ),
+  )
+  return [...byJson.keys()].sort().flatMap((json) => {
+    const provenance = byJson.get(json)
+    return provenance === undefined ? [] : [provenance]
+  })
+}
 
 // First provider turn's input tokens: the run's first step-finish row — always
 // the first row of its session (rowid order), so cache-cold by construction.

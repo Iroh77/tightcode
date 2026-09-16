@@ -174,7 +174,9 @@ const makeEnv = (verdict?: BindingVerdict.Options, flags?: Partial<RuntimeFlags.
 const wrapper = testEffect(makeEnv({ pin: "binding" }))
 // R00-013 wrapper kill-switch: binding reverts to schema-eager round-1.
 const killSwitch = testEffect(makeEnv({ pin: "binding" }, { disableToolWrapper: true }))
-const advisory = testEffect(makeEnv({ probe: () => Effect.succeed("advisory") }))
+const advisory = testEffect(
+  makeEnv({ probe: () => Effect.succeed({ verdict: "advisory" as const, evidence: { kind: "call" as const, args: '{"answer":4}' } }) }),
+)
 
 const cfg = {
   provider: {

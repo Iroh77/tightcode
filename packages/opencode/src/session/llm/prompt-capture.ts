@@ -3,6 +3,7 @@ import { type ModelMessage, type Tool } from "ai"
 import path from "path"
 import fs from "fs/promises"
 import type { Prepared } from "./request"
+import type { VerdictProvenance } from "../binding-verdict"
 
 // The dump envelope is a whitelist, not a redaction (R10-002): `params`,
 // `messageTransformOptions` and `headers` are structurally absent, so no
@@ -30,6 +31,9 @@ export type CaptureMeta = {
   // turns) and the producing binary's version constant. Additive optional —
   // old captures parse and report.
   readonly verdict?: "binding" | "advisory"
+  // R12-013: how the verdict was reached (cascade source, cache entry facts,
+  // raw probe evidence). Additive optional, same omission rule as `verdict`.
+  readonly verdictProvenance?: VerdictProvenance
   readonly binary?: string
 }
 

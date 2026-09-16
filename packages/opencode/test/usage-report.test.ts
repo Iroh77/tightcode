@@ -10,6 +10,7 @@ import {
   campaignReport,
   coldStartInput,
   deriveVerdicts,
+  deriveVerdictProvenances,
   diff,
   loadRun,
   payloadChars,
@@ -23,6 +24,7 @@ import {
   type UsageReport,
 } from "../script/measure-usage"
 import type { CaptureFile } from "../src/session/llm/prompt-capture"
+import type { VerdictProvenance } from "../src/session/binding-verdict"
 import type { CampaignSpec } from "../script/reference-workload"
 
 const manifest = (input?: Partial<RunManifest>): RunManifest => ({
@@ -474,6 +476,40 @@ describe("deriveVerdicts", () => {
   test("no captures or absent meta.verdict → []", () => {
     expect(deriveVerdicts([])).toEqual([])
     expect(deriveVerdicts([verdictCapture("a"), verdictCapture("b")])).toEqual([])
+  })
+})
+
+describe("deriveVerdictProvenances", () => {
+  const provenanceCapture = (file: string, provenance?: VerdictProvenance): CaptureRecord => ({
+    file,
+    capture: capture("ses_a", file, undefined, provenance === undefined ? {} : { verdictProvenance: provenance }),
+  })
+
+  test("distinct provenances are recorded, sorted by their JSON form", () => {
+    expect(
+      deriveVerdictProvenances([
+        provenanceCapture("a", { origin: "pin" }),
+        provenanceCapture("b", { origin: "default" }),
+        provenanceCapture("c", { origin: "pin" }),
+      ]),
+    ).toEqual([{ origin: "default" }, { origin: "pin" }])
+  })
+
+  test("structurally equal origins with different facts stay distinct", () => {
+    expect(
+      deriveVerdictProvenances([
+        provenanceCapture("a", { origin: "cache", source: "probe", timestamp: 1 }),
+        provenanceCapture("b", { origin: "cache", source: "probe", timestamp: 2 }),
+      ]),
+    ).toEqual([
+      { origin: "cache", source: "probe", timestamp: 1 },
+      { origin: "cache", source: "probe", timestamp: 2 },
+    ])
+  })
+
+  test("no captures or absent meta.verdictProvenance → []", () => {
+    expect(deriveVerdictProvenances([])).toEqual([])
+    expect(deriveVerdictProvenances([provenanceCapture("a"), provenanceCapture("b")])).toEqual([])
   })
 })
 

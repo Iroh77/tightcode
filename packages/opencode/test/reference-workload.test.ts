@@ -256,6 +256,7 @@ describe("reference-workload driver", () => {
     const manifest = JSON.parse(await Bun.file(path.join(runDir, "manifest.json")).text())
     expect(manifest.pin).toBe("binding")
     expect(manifest.verdicts).toEqual(["binding"])
+    expect(manifest.verdictProvenances).toEqual([{ origin: "pin" }])
     expect(manifest.binary).toBe("stub")
   })
 
@@ -266,6 +267,7 @@ describe("reference-workload driver", () => {
     const manifest = JSON.parse(await Bun.file(path.join(runDir, "manifest.json")).text())
     expect(manifest.pin).toBeNull()
     expect(manifest.verdicts).toEqual([])
+    expect(manifest.verdictProvenances).toEqual([])
     expect(manifest.binary).toBe("stub")
   })
 
@@ -449,12 +451,14 @@ describe("campaign runner", () => {
         expect(stubEnv.OPENCODE_ENABLE_PROMPT_CAPTURE).toBe("1")
         expect(manifest.capture).toBe(true)
         expect(manifest.verdicts).toEqual(["binding"])
+        expect(manifest.verdictProvenances).toEqual([{ origin: "pin" }])
         const captures = await fs.readdir(path.join(run.runDir, "data/opencode/prompt-captures/stub-session"))
         expect(captures).toHaveLength(prompts.length)
       } else {
         expect(stubEnv.OPENCODE_ENABLE_PROMPT_CAPTURE).toBeUndefined()
         expect(manifest.capture).toBe(false)
         expect(manifest.verdicts).toEqual([])
+        expect(manifest.verdictProvenances).toEqual([])
         await expect(fs.access(path.join(run.runDir, "data/opencode/prompt-captures"))).rejects.toThrow()
       }
       if (run.phase === "mcp") expect(config.mcp).toEqual(baseSpec.phases[1].mcp)

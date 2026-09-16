@@ -33,6 +33,7 @@ import { LLMRequestPrep } from "./llm/request"
 import type { SystemBlock } from "./llm/prompt-base"
 import { PromptBase } from "./llm/prompt-base"
 import type { ToolSeed, Verdict } from "./tool-listing"
+import type { VerdictProvenance } from "./binding-verdict"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -49,6 +50,9 @@ export type StreamInput = {
   tools: Record<string, Tool>
   toolSeeds?: ToolSeed[]
   toolVerdict?: Verdict
+  // R12-013: how the verdict was reached; rides the capture dump's meta next
+  // to toolVerdict. Absent when no lazy branch ran, like toolVerdict.
+  toolVerdictProvenance?: VerdictProvenance
   toolWrapper?: boolean
   retries?: number
   toolChoice?: "auto" | "required" | "none"

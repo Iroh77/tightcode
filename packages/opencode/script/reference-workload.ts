@@ -4,7 +4,7 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import { Schema } from "effect"
-import { deriveVerdicts, readCaptures, RunManifestSchema, type RunManifest } from "./measure-usage"
+import { deriveVerdicts, deriveVerdictProvenances, readCaptures, RunManifestSchema, type RunManifest } from "./measure-usage"
 import { prompts } from "./reference-workload/prompts"
 
 // Reference-workload driver (R10-004): runs the fixed prompt list (prompts.ts)
@@ -282,6 +282,7 @@ const executeRun = async (input: {
     endedAt: new Date().toISOString(),
     pin: input.pin,
     verdicts: deriveVerdicts(captureRecords),
+    verdictProvenances: deriveVerdictProvenances(captureRecords),
     binary: await resolveBinary({ cmd: input.cmd, stub: input.stub }),
   }
   if (!Schema.is(RunManifestSchema)(manifest))

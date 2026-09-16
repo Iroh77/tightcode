@@ -15,6 +15,7 @@ import BASE_TEMPLATE from "../../src/session/prompt/default.txt"
 import { TestInstance } from "../fixture/fixture"
 import { LLMRequestPrep } from "../../src/session/llm/request"
 import { PromptBase, type SystemBlock } from "../../src/session/llm/prompt-base"
+import type { VerdictProvenance } from "../../src/session/binding-verdict"
 import type { Plugin } from "../../src/plugin"
 import type { Provider } from "../../src/provider/provider"
 import { MessageID, SessionID } from "../../src/session/schema"
@@ -88,6 +89,7 @@ const prepareWith = (input: {
   tools?: Record<string, Tool>
   toolSeeds?: ToolSeed[]
   toolVerdict?: Verdict
+  toolVerdictProvenance?: VerdictProvenance
   toolWrapper?: boolean
   data?: string
   agent?: Agent.Info
@@ -114,6 +116,7 @@ const prepareWith = (input: {
       tools: input.tools ?? {},
       toolSeeds: input.toolSeeds ?? [],
       toolVerdict: input.toolVerdict,
+      toolVerdictProvenance: input.toolVerdictProvenance,
       toolWrapper: input.toolWrapper,
       provider,
       auth: undefined,
@@ -865,9 +868,11 @@ describe("session.llm-request-prep.capture-verdict-binary (R13-003/005, ticket 2
         tools: { glob: aiTool({ description: "find files", inputSchema: jsonSchema({ type: "object", properties: {} }) }) },
         toolSeeds: [{ name: "glob", kind: "deferred", fullDescription: "glob description", jsonSchema: { type: "object", properties: {} }, source: "builtin" }],
         toolVerdict: "advisory",
+        toolVerdictProvenance: { origin: "probe", evidence: { kind: "call", args: '{"answer":4}' } },
       })
       const file = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_verdict"))
       expect(file.meta.verdict).toBe("advisory")
+      expect(file.meta.verdictProvenance).toEqual({ origin: "probe", evidence: { kind: "call", args: '{"answer":4}' } })
       expect(file.meta.binary).toBe(InstallationVersion)
     }),
   )
@@ -894,6 +899,8 @@ describe("session.llm-request-prep.capture-verdict-binary (R13-003/005, ticket 2
       const small = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_small_verdict"))
       expect("verdict" in bypass.meta).toBe(false)
       expect("verdict" in small.meta).toBe(false)
+      expect("verdictProvenance" in bypass.meta).toBe(false)
+      expect("verdictProvenance" in small.meta).toBe(false)
       expect(bypass.meta.binary).toBe(InstallationVersion)
       expect(small.meta.binary).toBe(InstallationVersion)
     }),

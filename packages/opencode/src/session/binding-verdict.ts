@@ -11,10 +11,34 @@ import type { Verdict } from "./tool-listing"
 // The (provider, model, endpoint) tuple every verdict question is scoped to.
 export type Target = { model: Provider.Model; provider: Provider.Info }
 
-// Probe outcome: a verdict, or undefined when nothing was proven (transport
-// failure, timeout, no tool call, unparseable arguments). Failures of the
-// probe effect itself are caught by the cascade, so the error channel is free.
-export type Probe = (input: Target) => Effect.Effect<Verdict | undefined, unknown>
+// Probe outcome: a verdict plus the raw decoy answer as evidence (R12-013) —
+// any emitted call, its absence, or a known failure class. undefined = nothing
+// was learned (no language model, unexplained failure): the cascade's
+// conservative default, without evidence. Failures of the probe effect itself
+// are caught by the cascade, so the error channel is free.
+export type ProbeOutcome = { verdict: Verdict; evidence: ProbeEvidence }
+
+export type Probe = (input: Target) => Effect.Effect<ProbeOutcome | undefined, unknown>
+
+// R12-013: the raw decoy answer, never only the collapsed verdict. `args` is
+// the verbatim emitted arguments JSON, capped at 2048 chars.
+export type ProbeEvidence =
+  | { kind: "call"; args: string }
+  | { kind: "no-tool-call" }
+  | { kind: "failure"; class: "timeout" | "transport" | "unparseable" }
+
+// R12-013: how the verdict was reached — the originating cascade source,
+// preserved through in-memory propagation (a memo hit reports the origin that
+// populated it, never "memo"). Cache provenance carries the entry's source and
+// timestamp, plus its evidence when the entry carries one.
+export type VerdictProvenance =
+  | { origin: "pin" }
+  | { origin: "static-table" }
+  | { origin: "cache"; source: "probe" | "learned"; timestamp: number; evidence?: ProbeEvidence }
+  | { origin: "probe"; evidence: ProbeEvidence }
+  | { origin: "default" }
+
+export type ResolvedVerdict = { verdict: Verdict; provenance: VerdictProvenance }
 
 export type Options = {
   staticTable?: Record<string, Verdict>
@@ -26,7 +50,7 @@ export type Options = {
 }
 
 export interface Interface {
-  readonly resolve: (input: Target) => Effect.Effect<Verdict>
+  readonly resolve: (input: Target) => Effect.Effect<ResolvedVerdict>
   readonly observe: (input: Target & { reason: "schema-violation" }) => Effect.Effect<void>
 }
 
@@ -65,6 +89,24 @@ export const classifyProbeResponse = (input: unknown): Verdict | undefined => {
   return Object.keys(input).length === 0 ? "binding" : "advisory"
 }
 
+// R12-013: evidence is the verbatim emitted arguments JSON, bounded so a
+// pathological call cannot bloat the cache file.
+const PROBE_EVIDENCE_MAX_CHARS = 2048
+
+// R12-013: the probe's answer becomes evidence — a missing call and unparseable
+// arguments are their own classes, a record call carries its verbatim args
+// (capped). Exported so the mapping is testable without the AI SDK; the
+// transport class is defaultProbe's request-failure catch.
+export const probeOutcomeFromCall = (call: { input: unknown } | undefined): ProbeOutcome => {
+  if (call === undefined) return { verdict: "binding", evidence: { kind: "no-tool-call" } }
+  const verdict = classifyProbeResponse(call.input)
+  if (verdict === undefined) return { verdict: "binding", evidence: { kind: "failure", class: "unparseable" } }
+  return {
+    verdict,
+    evidence: { kind: "call", args: JSON.stringify(call.input ?? {}).slice(0, PROBE_EVIDENCE_MAX_CHARS) },
+  }
+}
+
 const PROBE_TOOL_NAME = "record_answer"
 const PROBE_MAX_OUTPUT_TOKENS = 200
 const PROBE_TIMEOUT = "10 seconds"
@@ -87,8 +129,11 @@ export const recordAnswer = tool({
   inputSchema: jsonSchema<Record<string, never>>(PROBE_DECOY_SCHEMA),
 })
 
-// Probe failures propagate to cascade(), the single catch point — it converts
-// every failure (transport, timeout, defect) into the binding default.
+// Probe failures map to evidence-bearing binding outcomes (R12-013): a failed
+// request is a transport failure, no tool call and unparseable arguments are
+// their own classes — each logged loudly (R00-010). Only "nothing was learned"
+// (no language model) returns undefined, which the cascade resolves as the
+// conservative default without evidence.
 const defaultProbe =
   (providerService: Provider.Interface): Probe =>
   (input) =>
@@ -101,7 +146,7 @@ const defaultProbe =
       // maxRetries: 0 — the probe is one cheap request, not a retried call
       // (R00-010). A timed-out request may still complete in the background;
       // its result is discarded.
-      const result = yield* Effect.tryPromise({
+      const attempted = yield* Effect.tryPromise({
         try: () =>
           generateText({
             model: language.value,
@@ -112,23 +157,52 @@ const defaultProbe =
             maxRetries: 0,
           }),
         catch: (cause) => cause,
-      })
-      const call = result.toolCalls.find((entry) => entry.toolName === PROBE_TOOL_NAME)
-      if (call === undefined) {
-        yield* Effect.logWarning("binding probe produced no tool call", { model: modelLabel(input) })
-        return undefined
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("binding probe request failed, treating as transport failure", {
+            model: modelLabel(input),
+            cause,
+          }).pipe(Effect.as(undefined)),
+        ),
+      )
+      if (attempted === undefined) {
+        return { verdict: "binding", evidence: { kind: "failure", class: "transport" } }
       }
-      return classifyProbeResponse(call.input)
+      const call = attempted.toolCalls.find((entry) => entry.toolName === PROBE_TOOL_NAME)
+      const outcome = probeOutcomeFromCall(call)
+      const warning =
+        outcome.evidence.kind === "no-tool-call"
+          ? "binding probe produced no tool call"
+          : outcome.evidence.kind === "failure"
+            ? "binding probe produced unparseable arguments, treating as failure"
+            : undefined
+      if (warning !== undefined) {
+        yield* Effect.logWarning(warning, { model: modelLabel(input) })
+      }
+      return outcome
     })
 
 const CACHE_FILE = "binding-verdicts.json"
 
 const PIN_ENV = "OPENCODE_PIN_BINDING_VERDICT"
 
+// R12-013: the probe's raw decoy answer rides the entry additively — a sticky
+// stale entry stays diagnosable offline. Entries predating the field stay
+// valid (their provenance reads as cache provenance without evidence).
+const ProbeEvidenceSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("call"), args: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal("no-tool-call") }),
+  Schema.Struct({
+    kind: Schema.Literal("failure"),
+    class: Schema.Literals(["timeout", "transport", "unparseable"]),
+  }),
+])
+
 const CacheEntry = Schema.Struct({
   verdict: Schema.Literals(["binding", "advisory"]),
   source: Schema.Literals(["probe", "learned"]),
   timestamp: Schema.Number,
+  evidence: Schema.optional(ProbeEvidenceSchema),
 })
 
 type CacheEntry = Schema.Schema.Type<typeof CacheEntry>
@@ -152,7 +226,7 @@ export const layerWith = (options: Options = {}) =>
 
       const state = yield* InstanceState.make(
         Effect.fn("BindingVerdict.state")(function* () {
-          return new Map<string, Verdict>()
+          return new Map<string, ResolvedVerdict>()
         }),
       )
 
@@ -192,41 +266,84 @@ export const layerWith = (options: Options = {}) =>
 
       const cascade = Effect.fn("BindingVerdict.cascade")(function* (input: Target & { key: string }) {
         const staticVerdict = staticTable[input.key]
-        if (staticVerdict !== undefined) return staticVerdict
+        if (staticVerdict !== undefined) {
+          const resolved: ResolvedVerdict = { verdict: staticVerdict, provenance: { origin: "static-table" } }
+          yield* Effect.logInfo("binding verdict resolved", { key: input.key, ...resolved })
+          return resolved
+        }
         const cached = (yield* readCache())[input.key]
-        if (cached !== undefined) return cached.verdict
-        const outcome = yield* probe(input).pipe(
-          Effect.timeout(PROBE_TIMEOUT),
+        if (cached !== undefined) {
+          const resolved: ResolvedVerdict = {
+            verdict: cached.verdict,
+            provenance: {
+              origin: "cache",
+              source: cached.source,
+              timestamp: cached.timestamp,
+              ...(cached.evidence !== undefined ? { evidence: cached.evidence } : {}),
+            },
+          }
+          yield* Effect.logInfo("binding verdict resolved", { key: input.key, ...resolved })
+          return resolved
+        }
+        // Failure first, timeout second: a probe that fails or dies is caught
+        // into "nothing learnable" (Some(undefined), logged); only a probe
+        // interrupted by the deadline resolves as Option.none — the timeout
+        // failure class (R12-013).
+        const probed = yield* probe(input).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("binding probe failed, defaulting to binding", { key: input.key, cause }).pipe(
-              Effect.as(undefined),
+              Effect.as(undefined as ProbeOutcome | undefined),
             ),
           ),
+          Effect.timeoutOption(PROBE_TIMEOUT),
         )
-        const verdict = outcome ?? "binding"
+        const timedOut = Option.isNone(probed)
+        if (timedOut) {
+          yield* Effect.logWarning("binding probe timed out, treating as timeout failure", { key: input.key })
+        }
+        const outcome: ProbeOutcome | undefined = timedOut
+          ? { verdict: "binding", evidence: { kind: "failure", class: "timeout" } }
+          : probed.value
+        const verdict = outcome?.verdict ?? "binding"
+        const evidence = outcome?.evidence
         // The probe outcome is persisted whatever it is — including the
         // binding default from a failed probe: a dead endpoint must not cost
         // every future session a round-trip (entries are sticky, decision
         // tool-lazy-loading-03 §4). "probe" reads as "resolved by the probe
-        // step", which a failed probe also is.
+        // step", which a failed probe also is; the raw answer rides along as
+        // evidence when one exists (R12-013).
         const now = yield* DateTime.nowAsDate
-        yield* writeEntry(input.key, { verdict, source: "probe", timestamp: now.getTime() })
-        return verdict
+        yield* writeEntry(input.key, {
+          verdict,
+          source: "probe",
+          timestamp: now.getTime(),
+          ...(evidence !== undefined ? { evidence } : {}),
+        })
+        const resolved: ResolvedVerdict =
+          evidence === undefined
+            ? { verdict, provenance: { origin: "default" } }
+            : { verdict, provenance: { origin: "probe", evidence } }
+        yield* Effect.logInfo("binding verdict resolved", { key: input.key, ...resolved })
+        return resolved
       })
 
       const resolve = Effect.fn("BindingVerdict.resolve")(function* (input: Target) {
         // The pin is cascade step 0 (basic-design-03 §5): ahead of the
         // memoized state, the static table, the cache and the probe — none of
         // them is touched, and a learned advisory (observe) cannot win while
-        // the pin stands.
-        if (pin !== undefined) return pin
+        // the pin stands. The pin wins every resolve (round-2 edge 10): its
+        // provenance stays { origin: "pin" } even after observe writes.
+        if (pin !== undefined) return { verdict: pin, provenance: { origin: "pin" } } satisfies ResolvedVerdict
         const entries = yield* InstanceState.get(state)
         const key = cacheKey(input)
-        const cached = entries.get(key)
-        if (cached !== undefined) return cached
-        const verdict = yield* cascade({ ...input, key })
-        entries.set(key, verdict)
-        return verdict
+        // The memo stores the full pair (R12-013): a hit reports the origin
+        // that populated it, never "memo" — the memo is a performance detail,
+        // not a cause.
+        const memo = entries.get(key)
+        if (memo !== undefined) return memo
+        const resolved = yield* cascade({ ...input, key })
+        entries.set(key, resolved)
+        return resolved
       })
 
       const observe = Effect.fn("BindingVerdict.observe")(function* (input: Target & { reason: "schema-violation" }) {
@@ -234,11 +351,16 @@ export const layerWith = (options: Options = {}) =>
         const current = (yield* readCache())[key]
         if (current?.verdict === "advisory") return
         const now = yield* DateTime.nowAsDate
-        yield* writeEntry(key, { verdict: "advisory", source: "learned", timestamp: now.getTime() })
+        const timestamp = now.getTime()
+        yield* writeEntry(key, { verdict: "advisory", source: "learned", timestamp })
         // Learning reaches future sessions of the same process: the next
         // resolve re-reads the cache instead of serving the memoized binding.
-        // On a cache write failure the memoized verdict stands.
-        ;(yield* InstanceState.get(state)).set(key, "advisory")
+        // On a cache write failure the memoized verdict stands. The memoized
+        // provenance mirrors the entry's (cache, learned, R12-013).
+        ;(yield* InstanceState.get(state)).set(key, {
+          verdict: "advisory",
+          provenance: { origin: "cache", source: "learned", timestamp },
+        })
       })
 
       return Service.of({ resolve, observe })

@@ -125,7 +125,7 @@ const verdictStub = (verdict: Verdict | undefined) =>
           ? Effect.die("BindingVerdict.resolve must not be called")
           : Effect.sync(() => {
               calls.push(target)
-              return verdict
+              return { verdict, provenance: { origin: "static-table" as const } }
             }),
       observe: () => Effect.void,
     }),
@@ -295,6 +295,7 @@ describe("session.tools lazy listing (ticket 05)", () => {
       // resolved before the session's first provider request, scoped to the (provider, model) tuple
       expect(calls).toEqual([{ model, provider: providerInfo }])
       expect(resolved.verdict).toBe("binding")
+      expect(resolved.verdictProvenance).toEqual({ origin: "static-table" })
       expect(resolved.wrapper).toBe(true)
       // the meta-tool seed is pushed before shape and classified eager; the
       // closed definition rides the seed verbatim
@@ -341,6 +342,7 @@ describe("session.tools lazy listing (ticket 05)", () => {
     Effect.gen(function* () {
       const resolved = yield* resolveGlob
       expect(resolved.verdict).toBeUndefined()
+      expect(resolved.verdictProvenance).toBeUndefined()
       expect(resolved.wrapper).toBeUndefined()
       expect(resolved.seeds).toEqual([])
       expect(resolved.tools.glob.description).toBe(long)
@@ -382,7 +384,7 @@ describe("session.tools direct-call fallback (ticket 07)", () => {
   const verdictLearn = Layer.succeed(
     BindingVerdict.Service,
     BindingVerdict.Service.of({
-      resolve: () => Effect.succeed("advisory" as Verdict),
+      resolve: () => Effect.succeed({ verdict: "advisory" as Verdict, provenance: { origin: "static-table" as const } }),
       observe: () =>
         Effect.sync(() => {
           observed.push("schema-violation")
@@ -527,7 +529,7 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
   const verdictObserve = Layer.succeed(
     BindingVerdict.Service,
     BindingVerdict.Service.of({
-      resolve: () => Effect.succeed("binding" as Verdict),
+      resolve: () => Effect.succeed({ verdict: "binding" as Verdict, provenance: { origin: "static-table" as const } }),
       observe: () =>
         Effect.sync(() => {
           observed.push("schema-violation")

@@ -1296,6 +1296,7 @@ const layer = Layer.effect(
               tools: resolved.tools,
               toolSeeds: resolved.seeds,
               toolVerdict: resolved.verdict,
+              toolVerdictProvenance: resolved.verdictProvenance,
               toolWrapper: resolved.wrapper,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,

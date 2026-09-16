@@ -71,8 +71,8 @@ if (process.env.OPENCODE_ENABLE_PROMPT_CAPTURE === "1") {
     .reduce((max, match) => Math.max(max, Number(match)), -1) + 1
   const [providerID = "stub", ...modelRest] = (model ?? "stub/stub").split("/")
   // Harness v2 mirror (R13-003/005): the pin env is the offline stand-in for
-  // the fork's resolved verdict — mapped verbatim, absent on anything else;
-  // binary is always the stub identity.
+  // the fork's resolved verdict — mapped verbatim with its R12-013 pin
+  // provenance, absent on anything else; binary is always the stub identity.
   const pinVerdict = process.env.OPENCODE_PIN_BINDING_VERDICT
   const capture: CaptureFile = {
     meta: {
@@ -89,7 +89,9 @@ if (process.env.OPENCODE_ENABLE_PROMPT_CAPTURE === "1") {
         lazyTools: process.env.OPENCODE_DISABLE_LAZY_TOOLS !== "1",
         staticSlimming: process.env.OPENCODE_DISABLE_STATIC_SLIMMING !== "1",
       },
-      ...(pinVerdict === "binding" || pinVerdict === "advisory" ? { verdict: pinVerdict } : {}),
+      ...(pinVerdict === "binding" || pinVerdict === "advisory"
+        ? { verdict: pinVerdict, verdictProvenance: { origin: "pin" } }
+        : {}),
       binary: "stub",
     },
     payload: {
