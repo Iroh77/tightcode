@@ -26,21 +26,31 @@ describe("deferredToolInput", () => {
     expect(deferredToolInput(input)).toEqual({ filePath: "/a/b.txt", oldString: "a", newString: "b" })
   })
 
-  test("returns undefined for unparseable or non-object args", () => {
+  test("returns undefined for an envelope whose args do not parse to an object", () => {
     const args = (args: unknown) => ({ name: "edit", args })
     expect(deferredToolInput(args(""))).toBeUndefined()
     expect(deferredToolInput(args("not json"))).toBeUndefined()
     expect(deferredToolInput(args("null"))).toBeUndefined()
     expect(deferredToolInput(args("[1,2]"))).toBeUndefined()
     expect(deferredToolInput(args("\"text\""))).toBeUndefined()
-    expect(deferredToolInput(args(42))).toBeUndefined()
-    expect(deferredToolInput(args(undefined))).toBeUndefined()
   })
 
-  test("returns undefined for non-envelope input shapes", () => {
+  test("passes a non-envelope object through even when it resembles one", () => {
+    expect(deferredToolInput({ name: "edit", args: 42 })).toEqual({ name: "edit", args: 42 })
+    expect(deferredToolInput({ name: "edit", args: undefined })).toEqual({ name: "edit", args: undefined })
+  })
+
+  test("passes already-parsed inner args through as-is (stored completed parts)", () => {
+    const inner = { filePath: "/a/b.txt", oldString: "a", newString: "b" }
+    expect(deferredToolInput(inner)).toBe(inner)
+    expect(deferredToolInput({})).toEqual({})
+    expect(deferredToolInput({ args: "{}" })).toEqual({ args: "{}" })
+    expect(deferredToolInput({ name: 42, args: "{}" })).toEqual({ name: 42, args: "{}" })
+  })
+
+  test("returns undefined for missing or non-object input", () => {
     expect(deferredToolInput(undefined)).toBeUndefined()
-    expect(deferredToolInput({})).toBeUndefined()
-    expect(deferredToolInput({ args: "{}" })).toBeUndefined()
-    expect(deferredToolInput({ name: 42, args: "{}" })).toBeUndefined()
+    expect(deferredToolInput([1, 2] as never)).toBeUndefined()
+    expect(deferredToolInput("text" as never)).toBeUndefined()
   })
 })
