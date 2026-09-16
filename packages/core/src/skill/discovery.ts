@@ -8,6 +8,7 @@ import { Global } from "../global"
 import { makeGlobalNode } from "../effect/app-node"
 import { httpClient } from "../effect/app-node-platform"
 import { AbsolutePath } from "../schema"
+import { base64Encode } from "../util/encode"
 
 const skillConcurrency = 4
 const fileConcurrency = 8
@@ -110,7 +111,9 @@ const layer = Layer.effect(
         )
         if (!data) return []
 
-        const sourceRoot = path.resolve(global.cache, "skills", Bun.hash(base).toString(16))
+        // Runtime-agnostic deterministic cache-dir name (R00-016); the wyhash
+        // form this replaces orphaned pre-existing cache dirs — accepted, it is a cache.
+        const sourceRoot = path.resolve(global.cache, "skills", base64Encode(base))
         return yield* Effect.forEach(
           data.skills.flatMap((skill) => {
             if (!isSafeSegment(skill.name)) {

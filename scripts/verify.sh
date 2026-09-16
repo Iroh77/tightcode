@@ -20,6 +20,23 @@ bun run lint
 echo "== typecheck (turbo) =="
 bun run typecheck
 
+echo "== runtime-agnostic check (R00-016) =="
+# Server-executed code must not touch the Bun global unguarded: the desktop
+# embeds the server under Electron's Node runtime (R00-015). Bun-only CLI
+# entrypoints, test files, and the sanctioned `typeof Bun` guard are exempt
+# (basic-design-04).
+violations="$(grep -rn 'Bun\.' packages/opencode/src packages/core/src \
+  --include='*.ts' \
+  | grep -v '\.test\.' \
+  | grep -v 'src/cli/' \
+  | grep -v 'typeof Bun' \
+  || true)"
+if [[ -n "$violations" ]]; then
+  echo "unguarded Bun global reference(s) in server-executed code (R00-016):"
+  echo "$violations"
+  exit 1
+fi
+
 echo "== tests =="
 # Upstream has no root test suite — tests run per package:
 #   ./scripts/verify.sh core       → bun test --cwd packages/core

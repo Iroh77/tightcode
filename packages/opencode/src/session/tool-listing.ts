@@ -188,6 +188,9 @@ type UpdateToolCall = SessionProcessor.Handle["updateToolCall"]
 // into the error state. Bounded; a settled part or an exhausted wait logs.
 const METADATA_ATTEMPTS = 100
 const METADATA_DELAY_MS = 5
+// Runtime-agnostic bounded wait (R00-016): the desktop embeds the server under
+// Electron's Node, where the Bun global does not exist.
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 const writeMarkerWhenRunning = async (
   input: { run: EffectBridge.Shape; updateToolCall: UpdateToolCall; seed: ToolSeed },
@@ -217,7 +220,7 @@ const writeMarkerWhenRunning = async (
     if (!part) break
     if (part.state.status === "running") return
     if (part.state.status !== "pending") break
-    await Bun.sleep(METADATA_DELAY_MS)
+    await sleep(METADATA_DELAY_MS)
   }
   await input.run.promise(
     Effect.logWarning("tool fallback marker did not reach the running part", {

@@ -137,7 +137,7 @@ export const dump = Effect.fn("PromptCapture.dump")(function* (input: DumpInput)
   yield* Effect.tryPromise(() => fs.mkdir(dir, { recursive: true }))
   const entries = yield* Effect.tryPromise(() => fs.readdir(dir))
   const seq = String(nextSeq(entries)).padStart(4, "0")
-  yield* Effect.tryPromise(() => Bun.write(path.join(dir, `${seq}.json`), JSON.stringify(file, null, 2)))
+  yield* Effect.tryPromise(() => fs.writeFile(path.join(dir, `${seq}.json`), JSON.stringify(file, null, 2)))
 }, Effect.catchCause((cause) => Effect.logError("prompt capture dump failed, turn continues", { cause })))
 
 export * as PromptCapture from "./prompt-capture"

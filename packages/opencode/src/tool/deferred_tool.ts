@@ -57,6 +57,9 @@ const writeMetadata = (input: { run: EffectBridge.Shape; updateToolCall: UpdateT
 // or an exhausted wait logs — the marker would otherwise be lost silently.
 const METADATA_ATTEMPTS = 100
 const METADATA_DELAY_MS = 5
+// Runtime-agnostic bounded wait (R00-016): the desktop embeds the server under
+// Electron's Node, where the Bun global does not exist.
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 const writeMetadataWhenRunning = async (
   input: { run: EffectBridge.Shape; updateToolCall: UpdateToolCall },
@@ -68,7 +71,7 @@ const writeMetadataWhenRunning = async (
     if (!part) break
     if (part.state.status === "running") return
     if (part.state.status !== "pending") break
-    await Bun.sleep(METADATA_DELAY_MS)
+    await sleep(METADATA_DELAY_MS)
   }
   await input.run.promise(
     Effect.logWarning("deferred_tool metadata write did not reach the running part", {
