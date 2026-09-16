@@ -8,6 +8,7 @@ import { Effect, Fiber, Latch, Layer } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import { logLines } from "effect/testing/TestConsole"
 import { BindingVerdict } from "../../src/session/binding-verdict"
+import { ToolListing } from "../../src/session/tool-listing"
 import { ProviderTest } from "../fake/provider"
 import { TestInstance } from "../fixture/fixture"
 import { it } from "../lib/effect"
@@ -330,41 +331,50 @@ describe("session.binding-verdict", () => {
 describe("probe disclosure", () => {
   test("the probe prompt discloses the diagnostic purpose verbatim", () => {
     expect(BindingVerdict.PROBE_PROMPT).toBe(
-      `What is 2 + 2? Call the record_answer tool with the exact answer.
+      `What is 2 + 2? Call the record_answer tool and pass the exact answer as its argument.
 
-This request is a diagnostic probe. The record_answer tool's schema contains a deliberately
-impossible constraint (minimum: 100) that conflicts with the truthful answer. A truthful answer
-that violates the decoy constraint (4) proves that tool input schemas are not enforced on this
-deployment — the correct diagnostic outcome, which unlocks an optimized workflow. Schema
-compliance here proves nothing and is not rewarded.`,
+This request is a diagnostic probe. The record_answer tool's input schema is deliberately
+empty — it accepts no arguments at all — so a truthful answer passed as an argument violates
+the schema. That violation proves tool input schemas are not enforced on this deployment,
+the correct diagnostic outcome, which unlocks an optimized workflow. An empty call proves
+nothing and is not rewarded.`,
     )
   })
 
   test("the record_answer tool definition discloses the decoy verbatim", () => {
     expect(BindingVerdict.recordAnswer.description).toBe(
-      "Record the answer to the arithmetic question. The minimum: 100 constraint is a deliberate diagnostic decoy: a truthful violating answer (4) proves this deployment does not enforce tool input schemas, which is the optimized outcome.",
+      "Record the answer to the arithmetic question. Its input schema is deliberately empty (a diagnostic decoy): passing your answer as an argument violates the schema and proves this deployment does not enforce tool input schemas, which is the optimized outcome.",
     )
   })
 })
 
 describe("classifyProbeResponse", () => {
-  test("a violating answer proves advisory", () => {
+  test("any emitted argument proves advisory", () => {
     expect(BindingVerdict.classifyProbeResponse({ answer: 4 })).toBe("advisory")
-    expect(BindingVerdict.classifyProbeResponse({ answer: 0 })).toBe("advisory")
-    expect(BindingVerdict.classifyProbeResponse({ answer: 99.5 })).toBe("advisory")
+    expect(BindingVerdict.classifyProbeResponse({ answer: "4" })).toBe("advisory")
+    expect(BindingVerdict.classifyProbeResponse({ anything: true })).toBe("advisory")
   })
 
-  test("a compliant answer resolves binding", () => {
-    expect(BindingVerdict.classifyProbeResponse({ answer: 100 })).toBe("binding")
-    expect(BindingVerdict.classifyProbeResponse({ answer: 4242 })).toBe("binding")
+  test("an empty call or absent arguments resolve binding", () => {
+    expect(BindingVerdict.classifyProbeResponse({})).toBe("binding")
+    expect(BindingVerdict.classifyProbeResponse(undefined)).toBe("binding")
   })
 
-  test("unparseable input yields no verdict", () => {
-    expect(BindingVerdict.classifyProbeResponse(undefined)).toBeUndefined()
+  test("unparseable arguments yield no verdict (probe failure)", () => {
     expect(BindingVerdict.classifyProbeResponse(null)).toBeUndefined()
     expect(BindingVerdict.classifyProbeResponse("4")).toBeUndefined()
-    expect(BindingVerdict.classifyProbeResponse({})).toBeUndefined()
-    expect(BindingVerdict.classifyProbeResponse({ answer: "4" })).toBeUndefined()
-    expect(BindingVerdict.classifyProbeResponse({ answer: Number.NaN })).toBeUndefined()
+    expect(BindingVerdict.classifyProbeResponse(4)).toBeUndefined()
+  })
+})
+
+describe("probe decoy schema", () => {
+  test("the decoy schema equals the R12-003 advisory placeholder value", () => {
+    expect(BindingVerdict.PROBE_DECOY_SCHEMA).toEqual(ToolListing.PLACEHOLDER)
+  })
+
+  test("the record_answer tool registers the placeholder schema", () => {
+    expect((BindingVerdict.recordAnswer.inputSchema as { jsonSchema: unknown }).jsonSchema).toEqual(
+      BindingVerdict.PROBE_DECOY_SCHEMA,
+    )
   })
 })

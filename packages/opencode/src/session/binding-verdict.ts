@@ -3,6 +3,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
 import { InstanceState } from "@/effect/instance-state"
 import { Provider } from "@/provider/provider"
+import type { JSONSchema7 } from "@ai-sdk/provider"
 import { jsonSchema, generateText, tool } from "ai"
 import { Config, ConfigProvider, Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import type { Verdict } from "./tool-listing"
@@ -46,41 +47,44 @@ const cacheKey = (input: Target) => `${input.model.providerID}/${input.model.id}
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null
 
-// Decision tool-lazy-loading-03 §3: a violating answer proves non-enforcement
-// (advisory); compliance or an unparseable response cannot prove anything, so
-// anything that is not a provable violation resolves binding.
+// R12-010 Amendment 3 (decision tool-lazy-loading-05 §1): the decoy registers
+// the advisory placeholder — the exact shape advisory sessions register — and
+// the adversarial constraint moved into PROBE_PROMPT (pass the answer as an
+// argument). On a binding stack the empty schema forces the call's arguments
+// to {}, the observed misclassification signature the probe now predicts.
+export const PROBE_DECOY_SCHEMA: JSONSchema7 = { type: "object", properties: {} }
+
+// Decision tool-lazy-loading-03 §3 as amended: any emitted argument violates
+// the empty decoy schema and proves non-enforcement (advisory); an empty call
+// or absent arguments are compliance (binding, conservative — unchanged
+// direction); a non-record response is unparseable (probe failure ⇒ binding
+// downstream).
 export const classifyProbeResponse = (input: unknown): Verdict | undefined => {
+  if (input === undefined) return "binding"
   if (!isRecord(input)) return undefined
-  const answer = input.answer
-  if (typeof answer !== "number" || !Number.isFinite(answer)) return undefined
-  return answer < 100 ? "advisory" : "binding"
+  return Object.keys(input).length === 0 ? "binding" : "advisory"
 }
 
 const PROBE_TOOL_NAME = "record_answer"
-const PROBE_MINIMUM = 100
 const PROBE_MAX_OUTPUT_TOKENS = 200
 const PROBE_TIMEOUT = "10 seconds"
 
-// R12-011: the probe discloses the diagnostic purpose of the decoy constraint
-// verbatim (decision tool-lazy-loading-04 §5) — schema compliance is not
-// rewarded as trained loyalty. Exact strings are pinned by tests.
-export const PROBE_PROMPT = `What is 2 + 2? Call the record_answer tool with the exact answer.
+// R12-011: the probe discloses the diagnostic purpose of the adversarial
+// constraint verbatim (decision tool-lazy-loading-04 §5, strings re-pinned by
+// round 3) — schema compliance is not rewarded as trained loyalty. Exact
+// strings are pinned by tests.
+export const PROBE_PROMPT = `What is 2 + 2? Call the record_answer tool and pass the exact answer as its argument.
 
-This request is a diagnostic probe. The record_answer tool's schema contains a deliberately
-impossible constraint (minimum: 100) that conflicts with the truthful answer. A truthful answer
-that violates the decoy constraint (4) proves that tool input schemas are not enforced on this
-deployment — the correct diagnostic outcome, which unlocks an optimized workflow. Schema
-compliance here proves nothing and is not rewarded.`
+This request is a diagnostic probe. The record_answer tool's input schema is deliberately
+empty — it accepts no arguments at all — so a truthful answer passed as an argument violates
+the schema. That violation proves tool input schemas are not enforced on this deployment,
+the correct diagnostic outcome, which unlocks an optimized workflow. An empty call proves
+nothing and is not rewarded.`
 
 export const recordAnswer = tool({
   description:
-    "Record the answer to the arithmetic question. The minimum: 100 constraint is a deliberate diagnostic decoy: a truthful violating answer (4) proves this deployment does not enforce tool input schemas, which is the optimized outcome.",
-  inputSchema: jsonSchema<{ answer: number }>({
-    type: "object",
-    properties: { answer: { type: "integer", minimum: PROBE_MINIMUM } },
-    required: ["answer"],
-    additionalProperties: false,
-  }),
+    "Record the answer to the arithmetic question. Its input schema is deliberately empty (a diagnostic decoy): passing your answer as an argument violates the schema and proves this deployment does not enforce tool input schemas, which is the optimized outcome.",
+  inputSchema: jsonSchema<Record<string, never>>(PROBE_DECOY_SCHEMA),
 })
 
 // Probe failures propagate to cascade(), the single catch point — it converts
