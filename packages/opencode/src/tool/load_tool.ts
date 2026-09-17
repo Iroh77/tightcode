@@ -3,8 +3,21 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { PromptBase } from "../session/llm/prompt-base"
 import { Provider } from "../provider/provider"
 import type { FrozenToolEntry, Verdict } from "../session/tool-listing"
-import DESCRIPTION from "./load_tool.txt"
 import { Tool } from "./tool"
+
+// load_tool's listing description discloses what a loaded tool can do in the
+// resolved regime — one pinned variant per (verdict, wrapper) case, selected
+// at SessionTools.resolve before shape (decision tool-lazy-loading-06). The
+// old static load_tool.txt could not be accurate across the three regimes
+// and hard-coded the eager set.
+export const loadToolDescriptions = {
+  advisory: "Load a deferred tool's full description and schema (also supports multiple names to load several tools at once). The loaded tool can then be used normally.",
+  wrapper: "Load a deferred tool's full description and schema (also supports multiple names to load several tools at once). A loaded tool cannot be called directly. Instead, it must be executed through the deferred_tool tool, passing the arguments as deferred_tool requires.",
+  schemaEager: "Load a deferred tool's full description (also supports multiple names to load several tools at once).",
+} as const
+
+export const loadToolDescription = (verdict: Verdict, wrapper: boolean): string =>
+  verdict === "advisory" ? loadToolDescriptions.advisory : wrapper ? loadToolDescriptions.wrapper : loadToolDescriptions.schemaEager
 
 export const Parameters = Schema.Struct({
   tools: Schema.mutable(Schema.Array(Schema.String)).annotate({ description: "Deferred tool names to load" }),
@@ -53,7 +66,9 @@ export const LoadTool = Tool.define<typeof Parameters, Metadata, PromptBase.Serv
     const providerService = yield* Provider.Service
 
     return {
-      description: DESCRIPTION,
+      // The listing/payload description is overridden per session at
+      // SessionTools.resolve; the advisory variant is the static default.
+      description: loadToolDescriptions.advisory,
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<Metadata>) =>
         Effect.gen(function* () {

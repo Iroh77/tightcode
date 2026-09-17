@@ -137,6 +137,33 @@ const providerStub = Layer.mock(Provider.Service, {
 
 const layer = baseLayer()
 
+
+const processorStub = (state: SessionV1.ToolPart, onUpdate?: (part: SessionV1.ToolPart) => void) =>
+  ({
+    message: {
+      id: messageID,
+      sessionID,
+      role: "assistant",
+      parentID: MessageID.ascending(),
+      agent: "build",
+      mode: "build",
+      path: { cwd: "/tmp", root: "/tmp" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ModelV2.ID.make("test-model"),
+      providerID: ProviderV2.ID.make("test"),
+      time: { created: 1 },
+    } satisfies SessionV1.Assistant,
+    updateToolCall: (_toolCallID: string, update: (part: SessionV1.ToolPart) => SessionV1.ToolPart) =>
+      Effect.sync(() => {
+        const next = update(state)
+        state.state = next.state
+        onUpdate?.(state)
+        return state
+      }),
+    completeToolCall: () => Effect.void,
+  }) satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+
 const it = testEffect(Layer.mergeAll(layer, verdictStub("advisory"), providerStub))
 
 it.effect("preserves running tool start time across metadata updates", () =>
@@ -155,30 +182,10 @@ it.effect("preserves running tool start time across metadata updates", () =>
       },
     }
     const updates: number[] = []
-    const processor = {
-      message: {
-        id: messageID,
-        sessionID,
-        role: "assistant",
-        parentID: MessageID.ascending(),
-        agent: "build",
-        mode: "build",
-        path: { cwd: "/tmp", root: "/tmp" },
-        cost: 0,
-        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        modelID: ModelV2.ID.make("test-model"),
-        providerID: ProviderV2.ID.make("test"),
-        time: { created: 1 },
-      } satisfies SessionV1.Assistant,
-      updateToolCall: (_toolCallID, update) =>
-        Effect.sync(() => {
-          const next = update(state)
-          state.state = next.state
-          if (state.state.status === "running") updates.push(state.state.time.start)
-          return state
-        }),
-      completeToolCall: () => Effect.void,
-    } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+    const processor = processorStub(state, (part) => {
+      if (part.state.status === "running") updates.push(part.state.time.start)
+    })
+
 
     const resolved = yield* SessionTools.resolve({
       agent,
@@ -208,6 +215,82 @@ it.effect("preserves running tool start time across metadata updates", () =>
     if (state.state.status === "running") {
       expect(state.state.time.start).toBe(100)
     }
+  }),
+)
+
+const envelopeRegistry = Layer.succeed(
+  ToolRegistry.Service,
+  ToolRegistry.Service.of({
+    ids: () => Effect.succeed(["inner"]),
+    all: () => Effect.succeed([]),
+    named: () => Effect.die("unused"),
+    tools: () =>
+      Effect.succeed([
+        {
+          id: "inner",
+          description: "streams progress under the wrapper",
+          parameters: Schema.Struct({}),
+          jsonSchema: { type: "object", properties: {} },
+          execute: (_args, ctx) =>
+            Effect.gen(function* () {
+              yield* ctx.metadata({ title: "progress", metadata: { step: 1 } })
+              return { title: "inner", metadata: {}, output: "done" }
+            }),
+        } satisfies Tool.Def,
+      ]),
+  }),
+)
+
+const envelopeIt = testEffect(
+  Layer.mergeAll(baseLayer({ registry: envelopeRegistry }), verdictStub("advisory"), providerStub),
+)
+
+envelopeIt.effect("metadata writes never rewrite the running part's input (R12-012 verbatim)", () =>
+  Effect.gen(function* () {
+    // Wrapper-shaped part: the stored input is the emitted deferred_tool
+    // envelope while the inner execute receives the parsed inner args.
+    const envelope = { name: "edit", args: '{"filePath":"/f.txt"}' }
+    const state: SessionV1.ToolPart = {
+      id: partID,
+      sessionID,
+      messageID,
+      type: "tool",
+      tool: "deferred_tool",
+      callID,
+      state: {
+        status: "running",
+        input: envelope,
+        time: { start: 100 },
+      },
+    }
+    const processor = processorStub(state)
+    const resolved = yield* SessionTools.resolve({
+      agent,
+      model,
+      session: sessionStub,
+      processor,
+      bypassAgentCheck: false,
+      messages: [],
+      promptOps: promptOpsStub,
+    })
+    const execute = resolved.tools.inner.execute
+    if (!execute) throw new Error("inner tool is missing execute")
+
+    yield* Effect.promise(() =>
+      execute(
+        { filePath: "/f.txt" },
+        {
+          toolCallId: callID,
+          abortSignal: new AbortController().signal,
+          messages: [],
+        },
+      ),
+    )
+
+    if (state.state.status !== "running") throw new Error("part should still be running")
+    expect(state.state.input).toEqual(envelope)
+    expect(state.state.metadata).toEqual({ step: 1 })
+    expect(state.state.title).toBe("progress")
   }),
 )
 

@@ -48,7 +48,7 @@ import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import GLOB_DESCRIPTION from "../../src/tool/glob.txt"
-import LOAD_TOOL_DESCRIPTION from "../../src/tool/load_tool.txt"
+import { loadToolDescriptions } from "../../src/tool/load_tool"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -330,7 +330,7 @@ describe("lazy-loading session end-to-end", () => {
         expect(propertiesOf(shell!)).toContain("command")
         expect(read?.description?.endsWith("...")).toBe(false)
         expect(propertiesOf(read!)).toContain("filePath")
-        expect(loadTool?.description).toBe(LOAD_TOOL_DESCRIPTION)
+        expect(loadTool?.description).toBe(loadToolDescriptions.advisory)
         expect(propertiesOf(loadTool!)).toContain("tools")
 
         // R12-003: the deferred entry is name + truncated description + placeholder.

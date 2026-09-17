@@ -51,7 +51,7 @@ import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { logLines } from "effect/testing/TestConsole"
-import LOAD_TOOL_DESCRIPTION from "../../src/tool/load_tool.txt"
+import { loadToolDescriptions } from "../../src/tool/load_tool"
 import type { CaptureFile } from "../../src/session/llm/prompt-capture"
 
 // One shared data dir per capture mode: captures are namespaced per session,
@@ -325,7 +325,7 @@ describe("prompt capture end-to-end", () => {
           .toSorted()
         expect(dumpToolNames).toEqual(wireToolsOf(hits[0]!).map((fn) => fn.name).toSorted())
         const loadTool = first.payload.tools.load_tool!
-        expect(loadTool.description).toBe(LOAD_TOOL_DESCRIPTION)
+        expect(loadTool.description).toBe(loadToolDescriptions.wrapper)
         expect(loadTool.inputSchema).toEqual(wireToolsOf(hits[0]!).find((fn) => fn.name === "load_tool")?.parameters)
         expect(first.payload.messages.length).toBe((hits[0]!.body.messages as unknown[]).length)
         expect(first.payload.messages.map((message) => message.role as string)).toEqual(

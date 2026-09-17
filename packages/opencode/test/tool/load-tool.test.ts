@@ -9,9 +9,15 @@ import { PromptBase } from "../../src/session/llm/prompt-base"
 import { Provider } from "../../src/provider/provider"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { Truncate } from "../../src/tool/truncate"
-import { LoadTool, delivered } from "../../src/tool/load_tool"
+import { LoadTool, delivered, loadToolDescription, loadToolDescriptions } from "../../src/tool/load_tool"
 import type { Tool } from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
+
+test("loadToolDescription selects the pinned variant per regime", () => {
+  expect(loadToolDescription("advisory", false)).toBe(loadToolDescriptions.advisory)
+  expect(loadToolDescription("binding", true)).toBe(loadToolDescriptions.wrapper)
+  expect(loadToolDescription("binding", false)).toBe(loadToolDescriptions.schemaEager)
+})
 
 const sessionID = SessionID.make("ses_load-tool")
 const messageID = MessageID.ascending()

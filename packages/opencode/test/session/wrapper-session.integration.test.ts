@@ -43,6 +43,7 @@ import { Snapshot } from "../../src/snapshot"
 import { SystemPrompt } from "../../src/session/system"
 import { Todo } from "../../src/session/todo"
 import { DEFERRED_TOOL_DESCRIPTION, DEFERRED_TOOL_SCHEMA } from "../../src/tool/deferred_tool"
+import { loadToolDescriptions } from "../../src/tool/load_tool"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { TestInstance } from "../fixture/fixture"
@@ -50,7 +51,6 @@ import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import GLOB_DESCRIPTION from "../../src/tool/glob.txt"
 import GREP_DESCRIPTION from "../../src/tool/grep.txt"
-import LOAD_TOOL_DESCRIPTION from "../../src/tool/load_tool.txt"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -292,9 +292,18 @@ describe("binding+wrapper session end-to-end", () => {
       Effect.gen(function* () {
         const llm = yield* useServerConfig(providerCfg)
         const { session, prompt } = yield* sessionWithPrompt("Wrapper session", "find text files")
+        const { directory: dir } = yield* TestInstance
+        const fs = yield* FSUtil.Service
+        const file = `${dir}/hello.txt`
+        yield* fs.writeWithDirs(file, "hello\n")
 
         // Step 2: the wrapper call executes the inner tool.
         yield* llm.tool("deferred_tool", { name: "glob", args: JSON.stringify({ pattern: "*.json" }) })
+        // Verbatim envelope: a progress-streaming inner tool (edit calls
+        // ctx.metadata) through the wrapper — the part input must stay the
+        // emitted envelope, never the flattened inner args.
+        const editArgs = JSON.stringify({ filePath: file, oldString: "hello", newString: "world" })
+        yield* llm.tool("deferred_tool", { name: "edit", args: editArgs })
         // Step 3: unparseable args on a known name → schema-in-error.
         yield* llm.tool("deferred_tool", { name: "glob", args: "{oops" })
         // Step 3: the marker re-opens the short confirmation.
@@ -311,7 +320,7 @@ describe("binding+wrapper session end-to-end", () => {
         }
 
         const hits = yield* llm.hits
-        expect(hits).toHaveLength(5)
+        expect(hits).toHaveLength(6)
 
         // Step 1: the tools array is eager only — no deferred entry in any
         // form (truncated descriptions never render on a wrapper session).
@@ -331,6 +340,9 @@ describe("binding+wrapper session end-to-end", () => {
         expect(((meta.parameters ?? {}) as { required?: string[] }).required).toEqual(["name", "args"])
         expect((meta.parameters as { additionalProperties?: boolean }).additionalProperties).toBe(false)
         expect(meta.parameters).toEqual(DEFERRED_TOOL_SCHEMA)
+        // load_tool's description discloses what a loaded tool can do in the
+        // resolved regime (wrapper: callable only through deferred_tool).
+        expect(fnOf(hits[0]!, "load_tool")!.description).toBe(loadToolDescriptions.wrapper)
 
         // Step 1: the catalog block rides the system string — name +
         // truncated description bullets.
@@ -344,7 +356,7 @@ describe("binding+wrapper session end-to-end", () => {
 
         // Step 5: turn 2's system bytes + tool-entry shapes equal turn 1's
         // (no append event, R12-008).
-        for (const later of [1, 2, 3, 4]) {
+        for (const later of [1, 2, 3, 4, 5]) {
           expect(systemBytes(hits[later]!)).toBe(systemBytes(hits[0]!))
           expect(toolBytes(hits[later]!)).toBe(toolBytes(hits[0]!))
         }
@@ -365,6 +377,30 @@ describe("binding+wrapper session end-to-end", () => {
         expect(JSON.parse(wrapperCall!.function!.arguments!)).toEqual({ name: "glob", args: '{"pattern":"*.json"}' })
         const toolResult = (bodyOf(hits[1]!).messages ?? []).find((message) => message.role === "tool")
         expect(JSON.stringify(toolResult)).toContain("opencode.json")
+
+        // Verbatim envelope: the stored completed part keeps the emitted
+        // wrapper envelope (metadata progress writes never rewrite input), so
+        // the model's follow-up history shows the exact emitted call shape.
+        const editPart = parts.find(
+          (part): part is CompletedToolPart =>
+            part.tool === "deferred_tool" &&
+            part.state.status === "completed" &&
+            (part.state.input as Record<string, unknown> | undefined)?.name === "edit",
+        )
+        expect(editPart).toBeDefined()
+        expect(editPart!.state.input).toEqual({ name: "edit", args: editArgs })
+        expect(editPart!.state.output).toContain("Edit applied")
+        const editCall = hits
+          .flatMap((hit) => (bodyOf(hit).messages ?? []).flatMap((message) => message.tool_calls ?? []))
+          .find((call) => {
+            try {
+              return (JSON.parse(call.function?.arguments ?? "{}") as { name?: string }).name === "edit"
+            } catch {
+              return false
+            }
+          })
+        expect(editCall).toBeDefined()
+        expect(JSON.parse(editCall!.function!.arguments!)).toEqual({ name: "edit", args: editArgs })
 
         // Step 3: schema-in-error — the error carries the inner full schema
         // and the load_tool marker.
@@ -421,6 +457,7 @@ describe("binding+wrapper session end-to-end", () => {
         const glob = fnOf(hits[0]!, "glob")!
         expect(glob.description?.endsWith("...")).toBe(true)
         expect(propertiesOf(glob)).toContain("pattern")
+        expect(fnOf(hits[0]!, "load_tool")!.description).toBe(loadToolDescriptions.schemaEager)
 
         const parts = yield* toolPartsOf(session.id)
         const load = parts.find(
@@ -461,6 +498,7 @@ describe("binding+wrapper session end-to-end", () => {
         expect(glob.parameters).toEqual(PLACEHOLDER)
         expect(glob.description?.endsWith("...")).toBe(true)
         expect(glob.description).not.toBe(GLOB_DESCRIPTION)
+        expect(fnOf(hits[0]!, "load_tool")!.description).toBe(loadToolDescriptions.advisory)
       }),
     30000,
   )

@@ -8,6 +8,7 @@ import { McpCatalog } from "@/mcp/catalog"
 import { Permission } from "@/permission"
 import { Tool } from "@/tool/tool"
 import { DEFERRED_TOOL_DESCRIPTION, DEFERRED_TOOL_SCHEMA, dispatch } from "@/tool/deferred_tool"
+import { loadToolDescription } from "@/tool/load_tool"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
@@ -72,6 +73,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps },
     agent: input.agent.name,
     messages: input.messages,
+    // Progress writes update title/metadata only — never state.input: under
+    // the wrapper the inner tool shares the wrapper's toolCallId, and
+    // rewriting input with the tool's own args would clobber the emitted
+    // deferred_tool envelope (R12-012 verbatim history). The processor's
+    // tool-call handler owns the input (it equals args on direct calls).
     metadata: (val) =>
       input.processor.updateToolCall(options.toolCallId, (match) => {
         if (!["running", "pending"].includes(match.state.status)) return match
@@ -81,7 +87,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             title: val.title,
             metadata: val.metadata,
             status: "running",
-            input: args,
+            input: match.state.input,
             time: match.state.status === "running" ? match.state.time : { start: Date.now() },
           },
         }
@@ -550,6 +556,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       jsonSchema: DEFERRED_TOOL_SCHEMA,
       source: "builtin",
     })
+  // load_tool's listing description discloses what a loaded tool can do in
+  // the resolved regime — selected before shape so the listing view, the
+  // payload (impose) and fullServe's head all carry the same variant.
+  const loadToolEntry = universe.find((entry) => entry.name === "load_tool")
+  if (loadToolEntry) loadToolEntry.description = loadToolDescription(verdict, wrapperActive)
   const seeds = ToolListing.shape({
     universe,
     ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
