@@ -609,20 +609,6 @@ function isTitleRequest(body: unknown): boolean {
   return JSON.stringify(body).includes("Generate a title for this conversation")
 }
 
-// The fork's R12-010 binding probe (decision tool-lazy-loading-03 §3) fires
-// one cheap adversarial request before a session's first provider request.
-// Answer it deterministically WITHOUT consuming the scripted queue — a text
-// reply with no tool call is a probe failure, which resolves conservative
-// binding. Without this, the probe would eat each test's first scripted
-// reply and every subprocess test would race the queue. Matched against the
-// request's tools array only, so model-visible messages quoting the probe
-// tool name never trip it.
-function isProbeRequest(body: unknown): boolean {
-  if (!body || typeof body !== "object") return false
-  const tools = (body as Record<string, unknown>).tools
-  return Array.isArray(tools) && JSON.stringify(tools).includes("record_answer")
-}
-
 namespace TestLLMServer {
   export interface Service {
     readonly url: string
@@ -691,15 +677,6 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
           hits = [...hits, current]
           yield* notify()
           const auto: Sse = { type: "sse", head: [role()], tail: [textLine("E2E Title"), finishLine("stop")] }
-          if (mode === "responses") return send(responses(auto, modelFrom(body)))
-          return send(auto)
-        }
-        if (isProbeRequest(body)) {
-          // Answered off the books: the scripted queue, hits/calls accounting
-          // and wait(n) choreography belong to the loop's model-visible turns
-          // (upstream tests pin them). The probe's text reply carries no tool
-          // call, so BindingVerdict resolves conservative binding.
-          const auto: Sse = { type: "sse", head: [role()], tail: [textLine("ok"), finishLine("stop")] }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
           return send(auto)
         }

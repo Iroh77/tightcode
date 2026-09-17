@@ -489,10 +489,7 @@ describe("session.tool-listing withFallback (R12-006)", () => {
     messages?: SessionV1.WithParts[]
     part?: SessionV1.ToolPart
     execute: (args: unknown, options: ToolExecutionOptions) => Promise<unknown>
-    observe?: (args: unknown) => Effect.Effect<void>
-    noObserve?: boolean
   }) => {
-    const observed: string[] = []
     const marked: SessionV1.ToolPart[] = []
     let current = input.part
     const run = {
@@ -510,14 +507,10 @@ describe("session.tool-listing withFallback (R12-006)", () => {
             marked.push(current)
             return current
           }),
-        observe:
-          input.noObserve === true
-            ? undefined
-            : (input.observe ?? ((args) => Effect.sync(() => observed.push(JSON.stringify(args))))),
       },
       input.execute,
     )
-    return { wrapped, observed, marked, current: () => current }
+    return { wrapped, marked, current: () => current }
   }
 
   const rejection = async (promise: Promise<unknown>): Promise<unknown> =>
@@ -542,7 +535,6 @@ describe("session.tool-listing withFallback (R12-006)", () => {
     expect(state.metadata?.load_tool).toEqual({ tools: ["glob"] })
     // progress metadata written while running survives for failToolCall to preserve
     expect(state.metadata?.progress).toBe("half")
-    expect(h.observed).toEqual([])
   })
 
   test("repeat failure stays quiet: the delivery marker already opened the tool", async () => {
@@ -584,7 +576,7 @@ describe("session.tool-listing withFallback (R12-006)", () => {
     }
   })
 
-  test("invalid arguments observe the verdict even when already delivered, and stay quiet", async () => {
+  test("invalid arguments when already delivered stay quiet and upstream-shaped", async () => {
     const h = harness({
       messages: fallbackHistory(),
       part: runningPart(),
@@ -594,13 +586,12 @@ describe("session.tool-listing withFallback (R12-006)", () => {
 
     const error = await rejection(h.wrapped({}, options()))
 
-    expect(h.observed).toEqual(["{}"])
     expect(error).toBeInstanceOf(Tool.InvalidArgumentsError)
     expect(h.current()).toEqual(before)
     expect(h.marked).toEqual([])
   })
 
-  test("invalid arguments when not delivered: observe, append the schema, mark", async () => {
+  test("invalid arguments when not delivered: append the schema, mark", async () => {
     const h = harness({
       part: runningPart(),
       execute: async () => { throw new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" }) },
@@ -608,29 +599,11 @@ describe("session.tool-listing withFallback (R12-006)", () => {
 
     const error = await rejection(h.wrapped({}, options()))
 
-    expect(h.observed).toEqual(["{}"])
     expect((error as Error).message).toContain("missing pattern")
     expect((error as Error).message).toContain(JSON.stringify(schema("glob"), null, 2))
     const marked = h.current()?.state
     if (marked?.status !== "running") throw new Error("part should still be running")
     expect(marked.metadata?.load_tool).toEqual({ tools: ["glob"] })
-  })
-
-  test("no observe wired: the invalid-arguments failure stays upstream-shaped, nothing observed", async () => {
-    const h = harness({
-      part: runningPart(),
-      execute: async () => { throw new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" }) },
-      noObserve: true,
-    })
-
-    const error = await rejection(h.wrapped({ pattern: "*" }, options()))
-
-    expect((error as Error).message).toContain("missing pattern")
-    expect((error as Error).message).toContain(JSON.stringify(schema("glob"), null, 2))
-    expect(h.observed).toEqual([])
-    const state = h.current()?.state
-    if (state?.status !== "running") throw new Error("part should still be running")
-    expect(state.metadata?.load_tool).toEqual({ tools: ["glob"] })
   })
 
   test("the marker only lands on a running part", async () => {

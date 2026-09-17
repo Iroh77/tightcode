@@ -146,21 +146,21 @@ const promptRoot = LayerNode.group([
   RuntimeFlags.node,
 ])
 
-// The fixture provider cannot answer the adversarial binding probe with a
-// violating tool call (the server answers probes off the books), so the
-// advisory session injects the verdict through the probe seam instead. The
-// binding session keeps the real cascade: probe request → no tool call →
-// conservative binding. The wrapper axis is killed off so the round-1
-// schema-eager binding bytes stay asserted end-to-end (R12-012: flag set ⇒
-// round-1 binding); the wrapper path is covered by ticket 21's integration test.
-const forcedVerdictNode = (probe: BindingVerdict.Probe) =>
+// Since Amendment 5 the advisory verdict is pin-only reachable: the advisory
+// session injects it through the cascade's step-0 pin seam. The binding
+// session is forced through the static-table seam (rule-based since the
+// collapse — endpoint-independent, so the fixture provider is matchable). The
+// wrapper axis is killed off so the round-1 schema-eager binding bytes stay
+// asserted end-to-end (R12-012: flag set ⇒ round-1 binding); the wrapper path
+// is covered by ticket 21's integration test.
+const forcedVerdictNode = (options: BindingVerdict.Options) =>
   LayerNode.make({
     service: BindingVerdict.Service,
-    layer: BindingVerdict.layerWith({ probe }),
-    deps: [FSUtil.node, Global.node, ProviderSvc.node],
+    layer: BindingVerdict.layerWith(options),
+    deps: [],
   })
 
-const makeEnv = (probe?: BindingVerdict.Probe, flags?: Partial<RuntimeFlags.Info>) => {
+const makeEnv = (verdict?: BindingVerdict.Options, flags?: Partial<RuntimeFlags.Info>) => {
   const root = LayerNode.group([promptRoot, testLLMServerNode])
   const replacements: LayerNode.Replacement[] = [
     [SessionSummary.node, summary],
@@ -168,16 +168,17 @@ const makeEnv = (probe?: BindingVerdict.Probe, flags?: Partial<RuntimeFlags.Info
     [MCP.node, mcp],
     [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true, ...flags })],
   ]
-  if (probe) replacements.push([BindingVerdict.node, forcedVerdictNode(probe)])
+  if (verdict) replacements.push([BindingVerdict.node, forcedVerdictNode(verdict)])
   return LayerNode.compile(root, replacements)
 }
 
-const advisoryProbe = (): BindingVerdict.ProbeOutcome => ({
-  verdict: "advisory",
-  evidence: { kind: "call", args: '{"answer":4}' },
-})
-const advisory = testEffect(makeEnv(() => Effect.succeed(advisoryProbe())))
-const binding = testEffect(makeEnv(undefined, { disableToolWrapper: true }))
+const advisory = testEffect(makeEnv({ pin: "advisory" }))
+const binding = testEffect(
+  makeEnv(
+    { staticTable: [{ providerID: "test", modelPrefix: "test-model", verdict: "binding" }] },
+    { disableToolWrapper: true },
+  ),
+)
 
 const cfg = {
   provider: {

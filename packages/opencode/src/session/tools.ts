@@ -533,12 +533,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   if (flags.disableLazyTools) return { tools, seeds: [], verdict: undefined, verdictProvenance: undefined }
 
   const bindingVerdict = yield* BindingVerdict.Service
-  const providerService = yield* Provider.Service
   // The verdict is resolved here, strictly before the session's first provider
-  // request (R12-010), scoped to the same (provider, model, endpoint) tuple
-  // the prompt base is frozen against; BindingVerdict memoizes per key.
-  const providerInfo = yield* providerService.getProvider(input.model.providerID)
-  const { verdict, provenance } = yield* bindingVerdict.resolve({ model: input.model, provider: providerInfo })
+  // request (R12-010), scoped to the same model the prompt base is frozen
+  // against; BindingVerdict memoizes per key.
+  const { verdict, provenance } = yield* bindingVerdict.resolve({ model: input.model })
   // R12-012: the wrapper activates only on binding sessions without its
   // kill-switch (disableLazyTools already early-returned above). It is env
   // —stable per session: the resolved pair (verdict, wrapper) is what the
@@ -579,14 +577,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       // tool-lazy-loading-02). The wrap does not depend on the listing view:
       // on wrapper sessions the deferred view is omitted (the payload drops
       // the entry) but the wrapped closure remains deferred_tool's dispatch
-      // target (decision tool-lazy-loading-04 §4).
-      // R12-010 Amendment 4: a violation is informative only on wrapper-active
-      // binding sessions — the only shape where no schema was served for the
-      // tool and the resolved verdict claims enforcement, so args violating
-      // the registered schema prove non-enforcement. Schema-eager serving can
-      // receive a model arg slip; advisory serving guarantees the violation
-      // (the self-sealing loop that poisoned the 2026-09-16 cache). Gated
-      // sessions pass no observe at all.
+      // target (decision tool-lazy-loading-04 §4). No verdict feedback:
+      // withFallback feeds nothing (R12-010 Amendment 5).
       const wrapped =
         seed.kind === "deferred"
           ? {
@@ -596,17 +588,6 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                   messages: input.messages,
                   run,
                   updateToolCall: input.processor.updateToolCall,
-                  observe:
-                    wrapperActive === false
-                      ? undefined
-                      : (args: unknown) =>
-                          bindingVerdict.observe({
-                            model: input.model,
-                            provider: providerInfo,
-                            reason: "schema-violation",
-                            tool: seed.name,
-                            args,
-                          }),
                 },
                 entry.execute,
               ),

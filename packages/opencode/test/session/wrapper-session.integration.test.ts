@@ -143,19 +143,16 @@ const promptRoot = LayerNode.group([
   RuntimeFlags.node,
 ])
 
-// Forced-verdict injection, ticket 08's node-replacement pattern: the
-// binding sessions pin the verdict through the cascade's step-0 pin seam
-// (R13-003, landed by ticket 16 — the static table cannot be used here
-// because its key embeds the server's dynamic port, unknowable at
-// layer-compile time), so the assertions never depend on the fixture
-// provider's probe behavior. The advisory session injects the verdict
-// through the probe seam instead (the fixture provider cannot answer the
-// probe with a violating tool call).
+// Forced-verdict injection, ticket 08's node-replacement pattern: every
+// session injects the verdict through the cascade's step-0 pin seam
+// (R13-003) — binding for the wrapper runs, advisory for the Amendment 5
+// regression-guard run (the only advisory reachability). The fixture
+// provider's models match no production static-table rule either way.
 const forcedVerdictNode = (options: BindingVerdict.Options) =>
   LayerNode.make({
     service: BindingVerdict.Service,
     layer: BindingVerdict.layerWith(options),
-    deps: [FSUtil.node, Global.node, ProviderSvc.node],
+    deps: [],
   })
 
 const makeEnv = (verdict?: BindingVerdict.Options, flags?: Partial<RuntimeFlags.Info>) => {
@@ -174,9 +171,7 @@ const makeEnv = (verdict?: BindingVerdict.Options, flags?: Partial<RuntimeFlags.
 const wrapper = testEffect(makeEnv({ pin: "binding" }))
 // R00-013 wrapper kill-switch: binding reverts to schema-eager round-1.
 const killSwitch = testEffect(makeEnv({ pin: "binding" }, { disableToolWrapper: true }))
-const advisory = testEffect(
-  makeEnv({ probe: () => Effect.succeed({ verdict: "advisory" as const, evidence: { kind: "call" as const, args: '{"answer":4}' } }) }),
-)
+const advisory = testEffect(makeEnv({ pin: "advisory" }))
 
 const cfg = {
   provider: {

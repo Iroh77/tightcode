@@ -148,8 +148,8 @@ describe("session.prompt-base", () => {
         const first = yield* promptBase.reconcileTools({ ...base, seeds: [seed("glob")] })
         expect(first.mode).toBe("advisory")
 
-        // BindingVerdict.observe can flip the per-turn verdict mid-session
-        // (behavioral learning); the frozen base's mode is already written.
+        // A per-turn verdict change (different resolved verdict mid-session);
+        // the frozen base's mode is already written.
         const flipped = yield* promptBase.reconcileTools({
           ...base,
           mode: "binding" as const,
@@ -193,8 +193,9 @@ describe("session.prompt-base", () => {
         expect(first.mode).toBe("binding")
         expect(first.wrapper).toBe(true)
 
-        // A mid-session flag or verdict change (kill-switch flip, observe
-        // flip) cannot mutate the written shapes: the frozen pair decides.
+        // A mid-session flag or verdict change (kill-switch flip, a changed
+        // per-turn verdict) cannot mutate the written shapes: the frozen pair
+        // decides.
         const flipped = yield* promptBase.reconcileTools({
           ...base,
           mode: "advisory" as const,

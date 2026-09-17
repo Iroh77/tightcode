@@ -520,7 +520,7 @@ describe("session.llm-request-prep.tool-freeze", () => {
         toolSeeds: seedsTurn(),
         toolVerdict: "binding",
       })
-      // a mid-session BindingVerdict.observe flip changes the per-turn verdict…
+      // a different per-turn verdict changes the request's mode input…
       const flipped = yield* prepareWith({
         promptBase,
         flags: base,
@@ -868,11 +868,11 @@ describe("session.llm-request-prep.capture-verdict-binary (R13-003/005, ticket 2
         tools: { glob: aiTool({ description: "find files", inputSchema: jsonSchema({ type: "object", properties: {} }) }) },
         toolSeeds: [{ name: "glob", kind: "deferred", fullDescription: "glob description", jsonSchema: { type: "object", properties: {} }, source: "builtin" }],
         toolVerdict: "advisory",
-        toolVerdictProvenance: { origin: "probe", evidence: { kind: "call", args: '{"answer":4}' } },
+        toolVerdictProvenance: { origin: "static-table" },
       })
       const file = yield* Effect.promise(() => readCaptureMeta(data, "ses_capture_verdict"))
       expect(file.meta.verdict).toBe("advisory")
-      expect(file.meta.verdictProvenance).toEqual({ origin: "probe", evidence: { kind: "call", args: '{"answer":4}' } })
+      expect(file.meta.verdictProvenance).toEqual({ origin: "static-table" })
       expect(file.meta.binary).toBe(InstallationVersion)
     }),
   )

@@ -104,8 +104,8 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pr
 type PromptBaseState = {
   systemBlocks: SystemBlock[]
   toolEntries: Map<string, FrozenToolEntry>
-  // The R12-010 verdict frozen with the first tool write: a mid-session
-  // BindingVerdict.observe flip must never re-render frozen entries (R12-007).
+  // The R12-010 verdict frozen with the first tool write: a per-turn verdict
+  // change must never re-render frozen entries (R12-007).
   mode?: Verdict
   // The R12-012 wrapper axis frozen next to the mode: the pair (mode, wrapper)
   // is exactly what decided the written listing shapes.

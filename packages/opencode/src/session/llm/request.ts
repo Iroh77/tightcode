@@ -162,8 +162,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         seeds: input.toolSeeds ?? [],
         // The resolved R12-010 verdict rides the stream input from
         // SessionTools.resolve; the base freezes it at the first write
-        // (reconcileTools returns the frozen mode, so a mid-session observe
-        // flip never re-renders written entries). A missing verdict is an
+        // (reconcileTools returns the frozen mode, so a changed per-turn
+        // verdict never re-renders written entries). A missing verdict is an
         // unresolvable one — conservative binding (R12-010).
         mode: input.toolVerdict ?? "binding",
         // The R12-012 wrapper axis rides beside it; missing = round-1

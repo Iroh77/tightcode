@@ -20,33 +20,12 @@ import type { CampaignSchedule, CampaignSpec } from "./reference-workload"
 // always writes them (null/[] when nothing to record), v1 manifests read as
 // null/[]. R12-013 (ticket 36) adds `verdictProvenances` the same way:
 // recorded, never gating (R13-003 gates on the verdict alone); old runs
-// without the field stay valid. Contracts: ARCHITECTURE/detailed/comparison-testing.md.
-const ProbeEvidenceSchema = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("call"), args: Schema.String }),
-  Schema.Struct({ kind: Schema.Literal("no-tool-call") }),
-  Schema.Struct({
-    kind: Schema.Literal("failure"),
-    class: Schema.Literals(["timeout", "transport", "unparseable"]),
-  }),
-])
-
-// R12-010 Amendment 4: learned advisory flips persist violation evidence.
-const ViolationEvidenceSchema = Schema.Struct({
-  kind: Schema.Literal("violation"),
-  tool: Schema.String,
-  args: Schema.String,
-})
-
+// without the field stay valid. R12-013 Amendment 1 (ticket 41): the union
+// shrinks to the collapsed cascade's origins — pin/static-table/default.
+// Contracts: ARCHITECTURE/detailed/comparison-testing.md.
 const VerdictProvenanceSchema = Schema.Union([
   Schema.Struct({ origin: Schema.Literal("pin") }),
   Schema.Struct({ origin: Schema.Literal("static-table") }),
-  Schema.Struct({
-    origin: Schema.Literal("cache"),
-    source: Schema.Literals(["probe", "learned"]),
-    timestamp: Schema.Number,
-    evidence: Schema.optional(Schema.Union([ProbeEvidenceSchema, ViolationEvidenceSchema])),
-  }),
-  Schema.Struct({ origin: Schema.Literal("probe"), evidence: ProbeEvidenceSchema }),
   Schema.Struct({ origin: Schema.Literal("default") }),
 ])
 

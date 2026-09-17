@@ -156,7 +156,7 @@ describe("session.prompt-capture.dump", () => {
       meta: {
         ...meta,
         verdict: "binding",
-        verdictProvenance: { origin: "probe", evidence: { kind: "no-tool-call" } },
+        verdictProvenance: { origin: "static-table" },
         binary: "opencode/1.2.3",
       },
     })
@@ -168,7 +168,7 @@ describe("session.prompt-capture.dump", () => {
       meta: Record<string, unknown>
     }
     expect(withFields.meta.verdict).toBe("binding")
-    expect(withFields.meta.verdictProvenance).toEqual({ origin: "probe", evidence: { kind: "no-tool-call" } })
+    expect(withFields.meta.verdictProvenance).toEqual({ origin: "static-table" })
     expect(withFields.meta.binary).toBe("opencode/1.2.3")
     expect("verdict" in without.meta).toBe(false)
     expect("verdictProvenance" in without.meta).toBe(false)

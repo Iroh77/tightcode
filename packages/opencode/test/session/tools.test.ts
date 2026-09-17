@@ -105,15 +105,6 @@ const baseLayer = (
     options.registry ?? timingRegistry,
   )
 
-const providerInfo: Provider.Info = {
-  id: ProviderV2.ID.make("test"),
-  name: "Test",
-  source: "custom",
-  env: [],
-  options: {},
-  models: {},
-}
-
 const calls: BindingVerdict.Target[] = []
 
 const verdictStub = (verdict: Verdict | undefined) =>
@@ -127,13 +118,9 @@ const verdictStub = (verdict: Verdict | undefined) =>
               calls.push(target)
               return { verdict, provenance: { origin: "static-table" as const } }
             }),
-      observe: () => Effect.void,
     }),
   )
 
-const providerStub = Layer.mock(Provider.Service, {
-  getProvider: () => Effect.succeed(providerInfo),
-})
 
 const layer = baseLayer()
 
@@ -164,7 +151,7 @@ const processorStub = (state: SessionV1.ToolPart, onUpdate?: (part: SessionV1.To
     completeToolCall: () => Effect.void,
   }) satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
 
-const it = testEffect(Layer.mergeAll(layer, verdictStub("advisory"), providerStub))
+const it = testEffect(Layer.mergeAll(layer, verdictStub("advisory")))
 
 it.effect("preserves running tool start time across metadata updates", () =>
   Effect.gen(function* () {
@@ -242,7 +229,7 @@ const envelopeRegistry = Layer.succeed(
 )
 
 const envelopeIt = testEffect(
-  Layer.mergeAll(baseLayer({ registry: envelopeRegistry }), verdictStub("advisory"), providerStub),
+  Layer.mergeAll(baseLayer({ registry: envelopeRegistry }), verdictStub("advisory")),
 )
 
 envelopeIt.effect("metadata writes never rewrite the running part's input (R12-012 verbatim)", () =>
@@ -351,23 +338,21 @@ describe("session.tools lazy listing (ticket 05)", () => {
   })
 
   const itBinding = testEffect(
-    Layer.mergeAll(baseLayer({ registry: globRegistry }), verdictStub("binding"), providerStub),
+    Layer.mergeAll(baseLayer({ registry: globRegistry }), verdictStub("binding")),
   )
   const itBindingNoWrapper = testEffect(
     Layer.mergeAll(
       baseLayer({ flags: { disableToolWrapper: true }, registry: globRegistry }),
       verdictStub("binding"),
-      providerStub,
     ),
   )
   const itAdvisory = testEffect(
-    Layer.mergeAll(baseLayer({ registry: globRegistry }), verdictStub("advisory"), providerStub),
+    Layer.mergeAll(baseLayer({ registry: globRegistry }), verdictStub("advisory")),
   )
   const itKillSwitch = testEffect(
     Layer.mergeAll(
       baseLayer({ flags: { disableLazyTools: true }, registry: globRegistry }),
       verdictStub(undefined),
-      providerStub,
     ),
   )
 
@@ -375,8 +360,8 @@ describe("session.tools lazy listing (ticket 05)", () => {
     Effect.gen(function* () {
       calls.length = 0
       const resolved = yield* resolveGlob
-      // resolved before the session's first provider request, scoped to the (provider, model) tuple
-      expect(calls).toEqual([{ model, provider: providerInfo }])
+      // resolved before the session's first provider request, scoped to the model
+      expect(calls).toEqual([{ model }])
       expect(resolved.verdict).toBe("binding")
       expect(resolved.verdictProvenance).toEqual({ origin: "static-table" })
       expect(resolved.wrapper).toBe(true)
@@ -463,26 +448,13 @@ describe("session.tools direct-call fallback (ticket 07)", () => {
     }),
   )
 
-  const observed: string[] = []
-  const verdictLearn = Layer.succeed(
-    BindingVerdict.Service,
-    BindingVerdict.Service.of({
-      resolve: () => Effect.succeed({ verdict: "advisory" as Verdict, provenance: { origin: "static-table" as const } }),
-      observe: () =>
-        Effect.sync(() => {
-          observed.push("schema-violation")
-        }),
-    }),
-  )
-
   const itFallback = testEffect(
-    Layer.mergeAll(baseLayer({ registry: failingGlobRegistry }), verdictLearn, providerStub),
+    Layer.mergeAll(baseLayer({ registry: failingGlobRegistry }), verdictStub("advisory")),
   )
   const itOff = testEffect(
     Layer.mergeAll(
       baseLayer({ flags: { disableLazyTools: true }, registry: failingGlobRegistry }),
       verdictStub(undefined),
-      providerStub,
     ),
   )
 
@@ -535,11 +507,8 @@ describe("session.tools direct-call fallback (ticket 07)", () => {
       ),
     )
 
-  itFallback.effect(
-    "a failed deferred call appends the schema and marks the part; an advisory-resolved session feeds no observe (Amendment 4)",
-    () =>
+  itFallback.effect("a failed deferred call appends the schema and marks the part", () =>
       Effect.gen(function* () {
-        observed.length = 0
         const state = runningGlobPart()
         const resolved = yield* SessionTools.resolve(failingResolveInput(state))
 
@@ -551,13 +520,11 @@ describe("session.tools direct-call fallback (ticket 07)", () => {
         expect((rejection as Error).message).toContain(JSON.stringify(globSchema, null, 2))
         if (state.state.status !== "running") throw new Error("part should still be running")
         expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
-        expect(observed).toEqual([])
       }),
   )
 
-  itOff.effect("kill-switch: a failed deferred call stays upstream — no schema append, no marker, no observe", () =>
+  itOff.effect("kill-switch: a failed deferred call stays upstream — no schema append, no marker", () =>
     Effect.gen(function* () {
-      observed.length = 0
       const state = runningGlobPart()
       const resolved = yield* SessionTools.resolve(failingResolveInput(state))
 
@@ -568,7 +535,6 @@ describe("session.tools direct-call fallback (ticket 07)", () => {
       expect((rejection as Error).message).not.toContain(JSON.stringify(globSchema))
       if (state.state.status !== "running") throw new Error("part should still be running")
       expect(state.state.metadata?.load_tool).toBeUndefined()
-      expect(observed).toEqual([])
     }),
   )
 })
@@ -610,45 +576,30 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
     Effect.die(new Tool.InvalidArgumentsError({ tool: "glob", detail: "missing pattern" })),
   )
 
-  const observed: string[] = []
-  const verdictObserve = Layer.succeed(
-    BindingVerdict.Service,
-    BindingVerdict.Service.of({
-      resolve: () => Effect.succeed({ verdict: "binding" as Verdict, provenance: { origin: "static-table" as const } }),
-      observe: (input) =>
-        Effect.sync(() => {
-          observed.push(input.tool)
-        }),
-    }),
-  )
-
-  const itWrapper = testEffect(Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("binding"), providerStub))
+  const itWrapper = testEffect(Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("binding")))
   const itWrapperFailing = testEffect(
-    Layer.mergeAll(baseLayer({ registry: failingGlob }), verdictObserve, providerStub),
+    Layer.mergeAll(baseLayer({ registry: failingGlob }), verdictStub("binding")),
   )
-  const itDenied = testEffect(Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("binding"), providerStub))
+  const itDenied = testEffect(Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("binding")))
   const itAdvisory = testEffect(
-    Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("advisory"), providerStub),
+    Layer.mergeAll(baseLayer({ registry: okGlob }), verdictStub("advisory")),
   )
   const itBindingNoWrapper = testEffect(
     Layer.mergeAll(
       baseLayer({ flags: { disableToolWrapper: true }, registry: okGlob }),
       verdictStub("binding"),
-      providerStub,
     ),
   )
   const itSchemaEagerFailing = testEffect(
     Layer.mergeAll(
       baseLayer({ flags: { disableToolWrapper: true }, registry: failingGlob }),
-      verdictObserve,
-      providerStub,
+      verdictStub("binding"),
     ),
   )
   const itKillSwitch = testEffect(
     Layer.mergeAll(
       baseLayer({ flags: { disableLazyTools: true }, registry: okGlob }),
       verdictStub(undefined),
-      providerStub,
     ),
   )
 
@@ -784,9 +735,8 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
     }),
   )
 
-  itWrapperFailing.effect("inner InvalidArgumentsError rides the fallback: schema once, marker once, observe fed", () =>
+  itWrapperFailing.effect("inner InvalidArgumentsError rides the fallback: schema once, marker once", () =>
     Effect.gen(function* () {
-      observed.length = 0
       const state = metaPart()
       const resolved = yield* SessionTools.resolve(resolveInput(state))
       const meta = resolved.tools.deferred_tool
@@ -798,13 +748,11 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
       if (state.state.status !== "running") throw new Error("part should still be running")
       expect(state.state.metadata?.load_tool).toEqual({ tools: ["glob"] })
       expect(state.state.metadata?.deferred_tool).toEqual({ tool: "glob" })
-      expect(observed).toEqual(["glob"])
     }),
   )
 
-  itSchemaEagerFailing.effect("wrapper kill-switch (schema-eager binding): a failed deferred call feeds no observe", () =>
+  itSchemaEagerFailing.effect("wrapper kill-switch (schema-eager binding): a failed deferred call still appends the schema", () =>
     Effect.gen(function* () {
-      observed.length = 0
       const state = metaPart()
       const resolved = yield* SessionTools.resolve(resolveInput(state))
       const meta = resolved.tools.deferred_tool
@@ -813,7 +761,6 @@ describe("session.tools deferred_tool meta-tool (ticket 19)", () => {
       if (!execute) throw new Error("glob is missing execute")
       const rejection = yield* rejectionOf(execute, { pattern: "*" })
       expect((rejection as Error).message).toContain(JSON.stringify(globSchema, null, 2))
-      expect(observed).toEqual([])
     }),
   )
 

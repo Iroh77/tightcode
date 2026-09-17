@@ -181,11 +181,10 @@ type UpdateToolCall = SessionProcessor.Handle["updateToolCall"]
 // The ai-sdk may begin executing the tool before the processor has consumed
 // the stream's "tool-call" part, so the part can still be pending when the
 // fallback marker writes — and the pending→running transition rebuilds the
-// state, dropping the write (same race deferred_tool.ts documents). The
-// observe hop used to mask this by accident; the Amendment 4 gate removed it,
-// so the write now waits for the running part explicitly. The marker must
-// land while the part is running — failToolCall preserves running metadata
-// into the error state. Bounded; a settled part or an exhausted wait logs.
+// state, dropping the write (same race deferred_tool.ts documents). The write
+// therefore waits for the running part explicitly. The marker must land while
+// the part is running — failToolCall preserves running metadata into the error
+// state. Bounded; a settled part or an exhausted wait logs.
 const METADATA_ATTEMPTS = 100
 const METADATA_DELAY_MS = 5
 // Runtime-agnostic bounded wait (R00-016): the desktop embeds the server under
@@ -240,17 +239,15 @@ export const schemaBlock = (seed: ToolSeed) =>
 // schema rides the error output and the part is marked loaded, so recovery is
 // protocol-level rather than willingness-level. Permission denials and aborts
 // are not arg-shape failures and stay upstream (R12-001 enforcement unchanged).
-// A schema-validation failure feeds BindingVerdict.observe when the caller
-// passed one (R12-010 Amendment 4: only informative sessions — wrapper-active
-// binding — wire it; the factory receives the failing args for the evidence
-// digest). Future sessions only, independent of the load state.
+// No verdict feedback survives (R12-010 Amendment 5): the marker/schema-append
+// semantics are this hook's only effect. Future sessions only, independent of
+// the load state.
 export const withFallback = (
   input: {
     seed: ToolSeed
     messages: SessionV1.WithParts[]
     run: EffectBridge.Shape
     updateToolCall: UpdateToolCall
-    observe?: (args: unknown) => Effect.Effect<void>
   },
   execute: (args: unknown, options: ToolExecutionOptions) => Promise<unknown>,
 ): ((args: unknown, options: ToolExecutionOptions) => Promise<unknown>) =>
@@ -265,8 +262,6 @@ export const withFallback = (
         error instanceof PermissionV1.CorrectedError
       )
         throw error
-      if (error instanceof Tool.InvalidArgumentsError && input.observe !== undefined)
-        await input.run.promise(input.observe(args))
       // Repeat failures stay quiet: the marker re-opens only when the model no
       // longer sees the part that delivered the full content.
       if (delivered(input.seed.name, input.messages)) throw error

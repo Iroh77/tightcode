@@ -495,18 +495,6 @@ describe("deriveVerdictProvenances", () => {
     ).toEqual([{ origin: "default" }, { origin: "pin" }])
   })
 
-  test("structurally equal origins with different facts stay distinct", () => {
-    expect(
-      deriveVerdictProvenances([
-        provenanceCapture("a", { origin: "cache", source: "probe", timestamp: 1 }),
-        provenanceCapture("b", { origin: "cache", source: "probe", timestamp: 2 }),
-      ]),
-    ).toEqual([
-      { origin: "cache", source: "probe", timestamp: 1 },
-      { origin: "cache", source: "probe", timestamp: 2 },
-    ])
-  })
-
   test("no captures or absent meta.verdictProvenance → []", () => {
     expect(deriveVerdictProvenances([])).toEqual([])
     expect(deriveVerdictProvenances([provenanceCapture("a"), provenanceCapture("b")])).toEqual([])
