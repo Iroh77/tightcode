@@ -18,6 +18,7 @@ import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
+import { InboundToolLog } from "./llm/inbound-tool-log"
 import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
@@ -94,6 +95,7 @@ const layer = Layer.effect(
     const image = yield* Image.Service
     const events = yield* EventV2Bridge.Service
     const database = yield* Database.Service
+    const inboundLog = yield* InboundToolLog.Service
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
@@ -652,8 +654,18 @@ const layer = Layer.effect(
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
+            // R10-010: the inbound log taps the stream BEFORE handleEvent —
+            // pre-parse, pre-transform. A fresh context per attempt scopes the
+            // delta buffers to this stream (a retry starts clean).
+            const captureContext = {
+              sessionID: ctx.sessionID,
+              messageID: ctx.assistantMessage.id,
+              providerID: ctx.model.providerID,
+              modelID: ctx.model.id,
+            }
 
             yield* stream.pipe(
+              Stream.tap((event) => inboundLog.capture(event, captureContext)),
               Stream.tap((event) => handleEvent(event)),
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
@@ -726,6 +738,7 @@ export const node = LayerNode.make({
     Image.node,
     EventV2Bridge.node,
     Database.node,
+    InboundToolLog.node,
   ],
 })
 

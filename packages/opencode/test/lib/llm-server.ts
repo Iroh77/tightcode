@@ -516,6 +516,14 @@ export class Reply {
     return this.toolCalls()
   }
 
+  // The arguments stream to the provider in exactly these chunks — the
+  // inbound-tool-log tests assert verbatim reassembly across ≥2 deltas.
+  toolChunks(name: string, chunks: string[]) {
+    const id = this.#id()
+    this.#tail = [...this.#tail, toolStartLine(id, name), ...chunks.map(toolArgsLine)]
+    return this.toolCalls()
+  }
+
   pendingTool(name: string, input: unknown) {
     const id = this.#id()
     const args = JSON.stringify(input)

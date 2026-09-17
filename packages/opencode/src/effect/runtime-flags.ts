@@ -27,6 +27,10 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   // default state (off) IS the upstream-identical one, so no disable flag
   // exists (decision context-observability-01).
   enablePromptCapture: bool("OPENCODE_ENABLE_PROMPT_CAPTURE"),
+  // Inbound tool-call debug log (R10-010): opt-in diagnostic artifact, off by
+  // default — its default state IS the upstream-identical one (capture
+  // precedent; R00-013 not implicated).
+  enableInboundToolLog: bool("OPENCODE_ENABLE_INBOUND_TOOL_LOG"),
   disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
   disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
   disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
